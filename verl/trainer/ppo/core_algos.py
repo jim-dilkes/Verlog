@@ -72,7 +72,9 @@ def compute_gae_advantage_return(
         dones: torch.Tensor, 
         token_lam: torch.Tensor, 
         step_lam: torch.Tensor,
-        n_rollouts: int = 2
+        n_rollouts: int = 2,
+        frozen_mask: torch.Tensor = None,
+        whiten: bool = True
     ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
@@ -89,10 +91,14 @@ def compute_gae_advantage_return(
             discounted factor used in RL (on episode dimension)
         dones: `(torch.Tensor)`
             shape: (bs, response_length). The episode ends at the step where the value is 1.0.
-        lam: `(float)`
-            lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        token_lam: `(float)`
+            lambda value when computing Generalized Advantage Estimation (token level)
+        step_lam: `(float)`
+            lambda value when computing Generalized Advantage Estimation (step level)
         n_rollouts: `(int)`
             number of rollouts in the batch. The batch size is `episode_len * n_rollouts`.
+        frozen_mask: `(torch.Tensor)`, optional
+            shape: (bs,). 1 for frozen steps (no GAE update), 0 for active steps.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -108,6 +114,12 @@ def compute_gae_advantage_return(
         batch_rewards = token_level_rewards.reshape(-1, n_rollouts, gen_len)
         batch_dones = dones.reshape(-1, n_rollouts)
         batch_response_mask = response_mask.reshape(-1, n_rollouts, gen_len)
+
+        # Handle frozen mask
+        if frozen_mask is not None:
+            batch_frozen = frozen_mask.reshape(-1, n_rollouts)
+        else:
+            batch_frozen = torch.zeros_like(batch_dones)
         
         episode_len, _, gen_len = batch_values.shape
         
@@ -124,7 +136,10 @@ def compute_gae_advantage_return(
             gamma = step_gamma
             lam = step_lam
             done_t = batch_dones[env_t] # done=1, not done=0
-            gae = (1 - done_t) * gae
+            frozen_t = batch_frozen[env_t] # frozen=1, active=0
+            
+            # Reset GAE
+            gae = (1 - done_t) * (1 - frozen_t) * gae
             
             for token_t in reversed(range(gen_len)):
                 
@@ -136,31 +151,41 @@ def compute_gae_advantage_return(
                 # While in ray_trainer and here, response_mask = attention_mask[:, -response_length:]
                 update_t = 1 if token_t == 0 else batch_response_mask[env_t, :, token_t-1]
                 
-                delta = rew_t + gamma * next_values * (1 - done_t) - v_t
+                # Don't update GAE for frozen steps
+                update_t = update_t * (1 - frozen_t)
+                
+                delta = rew_t + gamma * next_values * (1 - done_t) * (1 - frozen_t) - v_t
                 gae = (delta + gamma * lam * gae) * update_t + gae * (1 - update_t)
                 advantages_reversed.append(gae * update_t)
                 
+                # Only update next_values for non-frozen steps
                 next_values = v_t * update_t + next_values * (1 - update_t)
+                
+                # Only update done_t for non-frozen steps (frozen steps can't change done state)
                 done_t = done_t * (1 - update_t) # only mask the last token in the sequence (env done)
+                
                 gamma = token_gamma * update_t + step_gamma * (1 - update_t) # use step gamma only for the last token
                 lam = token_lam * update_t + step_lam * (1 - update_t) # use step lambda only for the last token
                 
             advantages_reversed = torch.stack(advantages_reversed, dim=-1)
             step_advantage = torch.flip(advantages_reversed, dims=[-1])
             all_advantages_reversed.append(step_advantage)
+            
         all_advantages_reversed = torch.stack(all_advantages_reversed, dim=0)
         all_advantages = torch.flip(all_advantages_reversed, dims=[0])
         advantages = all_advantages.reshape(-1, gen_len)
         returns = advantages + values
-        advantages = verl_F.masked_whiten(advantages, response_mask)
+        if whiten:
+            advantages = verl_F.masked_whiten(advantages, response_mask)
+        
     return advantages, returns
-
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(token_level_rewards: torch.Tensor,
                                    response_mask: torch.Tensor,
                                    index: np.ndarray,
-                                   epsilon: float = 1e-6):
+                                   epsilon: float = 1e-6,
+                                   group_all = True):
     """
     Compute advantage for GRPO, operating only on Outcome reward 
     (with only one scalar reward for each response).
@@ -181,23 +206,44 @@ def compute_grpo_outcome_advantage(token_level_rewards: torch.Tensor,
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
+    id2sum = {}
 
     with torch.no_grad():
-        bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
-        for i in range(bsz):
-            scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-        scores = scores.unsqueeze(-1) * response_mask
+        if group_all:
+            bsz = scores.shape[0]
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
+            for idx in id2score:
+                id2sum[idx] = torch.sum(torch.tensor(id2score[idx]))
+            ep_mean = torch.mean(torch.tensor(list(id2sum.values())))
+            ep_std = torch.std(torch.tensor(list(id2sum.values())))
+            
+            # Pre-compute normalized scores for each episode
+            id2normalized_score = {}
+            for idx in id2sum:
+                id2normalized_score[idx] = (id2sum[idx] - ep_mean) / (ep_std + epsilon)
+            
+            # Assign normalized episode scores to all batch steps
+            for i in range(bsz):
+                scores[i] = id2normalized_score[index[i]]
+            scores = scores.unsqueeze(-1) * response_mask       
+
+        else:
+            bsz = scores.shape[0]
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                    id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
+            for i in range(bsz):
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
 

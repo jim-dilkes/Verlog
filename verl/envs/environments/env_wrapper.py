@@ -38,6 +38,10 @@ class EnvWrapper(gym.Wrapper):
             obs = obs
         elif self.env_name == "crafter":
             obs = obs
+        elif self.env_name == "fastsnake":
+            obs = obs
+        elif self.env_name == "frozenlake":
+            obs = obs
         else:
             raise ValueError(f"Unknown environment: {self.env_name}")
 
@@ -75,9 +79,11 @@ class EnvWrapper(gym.Wrapper):
         elif self.env_name == "crafter":
             from verl.envs.environments.crafter import get_instruction_prompt
 
-            return get_instruction_prompt(self.task_name, info)
+            return get_instruction_prompt(self.env)
+        elif self.env_name in ["fastsnake", "frozenlake"]:
+            return self.env.get_instruction_prompt()
         else:
-            raise ValueError(f"Unknown environment: {self.env_namee}")
+            raise ValueError(f"Unknown environment: {self.env_name}")
 
     def check_action_validity(self, candidate_action):
         valid_action = None

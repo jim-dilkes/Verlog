@@ -1,3 +1,7 @@
+defaults:
+  - _self_
+  - evaluation: default
+
 data:
   tokenizer: null
   train_files: examples/data/placeholder.parquet
@@ -190,7 +194,7 @@ algorithm:
   step_lam: 1.0
   token_gamma: 1.0
   token_lam: 1.0
-  adv_estimator: gae
+  adv_estimator: gae  # options: gae, grpo, reinforce_plus_plus, reinforce_plus_plus_baseline, remax, rloo
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
@@ -198,6 +202,8 @@ algorithm:
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
+  # GRPO specific parameters
+  grpo_epsilon: 1e-6  # Numerical stability for normalization
 
 trainer:
   balance_batch: False # TODO: add balance_batch
@@ -205,6 +211,7 @@ trainer:
   total_training_steps: null
   project_name: verl_examples
   experiment_name: gsm8k
+  group: null
   logger: [ 'console', 'wandb' ]
   log_val_generations: 1 # log one msg per validation step
   nnodes: 1
@@ -219,9 +226,9 @@ trainer:
   critic_warmup_step: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
-  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
-  max_actor_ckpt_to_keep: null
-  max_critic_ckpt_to_keep: null
+  default_local_dir: /scratch/jsbd1n24/checkpoints_full/${trainer.project_name}/${trainer.experiment_name}
+  max_actor_ckpt_to_keep: 1
+  max_critic_ckpt_to_keep: 1
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
   render: False
@@ -229,20 +236,48 @@ trainer:
 
 envs:
   n_rollouts: 16
+  episode_length: 8
+  duplication_mode: none
+  group_initial_seed: none
+  group_rollout_size: null
   env_name: babyai
   task: BabyAI-MixedTrainLocal-v0/goto
+  grpo_mode: false  # Enable GRPO-specific environment handling
   format_penalty: 0.0
+  instruction_prompt: null
   binary_reward: False
+  freeze_completed_episodes: false  # Freeze environments when episodes complete to prevent cross-batch episode issues
   captioner:
     type: naive
     max_text_history: 1
     max_cot_history: 1
     max_image_history: 0
   babyai_kwargs:
-    num_dists: 0
-    # max_steps: 64
+  #   num_dists: 0
+    max_steps: 64
   babaisai_kwargs: 
     add_ruleset: True
+    max_step: 100
+  fastsnake_kwargs:
+    width: 10
+    height: 10
+    max_rounds: 100
+    num_external_snakes: 1
+    num_random_snakes: 1
+    num_apples: 5
+    num_bananas: 0
+    num_fires: 0
+    step_reward: -0.01
+    death_reward: -1
+    apple_reward: 1
+    banana_reward: 10
+    fire_reward: -1
+    hill_direction: null
+    destroy_at_bottom: false
+    include_absent_objects: true
+    print_visualization: true
+    print_coordinates: true
+    print_axes: false
   crafter_kwargs:
     area: [64, 64]              
     view: [9, 9]            
@@ -260,3 +295,12 @@ envs:
     save_ttyrec_every: 0
     autopickup: False           
     skip_more: True
+  frozenlake_kwargs:
+    random_map_size: 4
+    frozen_probability: 0.80
+    is_slippery: false
+    print_visualization: true
+    print_coordinates: true
+    print_axes: false
+    pad_observation_to_shape: null
+    max_rounds: 8

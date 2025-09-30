@@ -40,6 +40,7 @@ from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClass
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics, bootstrap_metric, calc_maj_val, process_validation_metrics
+from verl.trainer.ppo.multi_env_evaluator import MultiEnvEvaluator
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -177,7 +178,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, step_gamma=1.0, step_lam=1.0, token_gamma=1.0, token_lam=1.0, n_rollouts=1):
+def compute_advantage(data: DataProto, adv_estimator, step_gamma=1.0, step_lam=1.0, token_gamma=1.0, token_lam=1.0, n_rollouts=1, group_all=True):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch['response_mask'] = compute_response_mask(data)
@@ -194,14 +195,16 @@ def compute_advantage(data: DataProto, adv_estimator, step_gamma=1.0, step_lam=1
             dones=data.batch['done'], 
             token_lam=token_lam,
             step_lam=step_lam, 
-            n_rollouts=n_rollouts)
+            n_rollouts=n_rollouts,
+            frozen_mask=data.batch['frozen_mask'] if 'frozen_mask' in data.batch else None)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
-    elif adv_estimator == AdvantageEstimator.GRPO:
+    elif adv_estimator == AdvantageEstimator.GRPO: 
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch['token_level_rewards'],
             response_mask=data.batch['response_mask'],
-            index=data.non_tensor_batch['uid'])
+            index=data.non_tensor_batch['uid'],
+            group_all=group_all)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE:
@@ -283,17 +286,56 @@ class RayPPOTrainer(object):
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
 
+        
+        self.freeze_completed_episodes = getattr(self.config.envs, 'freeze_completed_episodes', False)
+
+        # Seed management for environment resets
+        group_initial_seed_config = getattr(config.envs, 'group_initial_seed', 'none')
+        if group_initial_seed_config == "random":
+            # Generate a random initial seed
+            import random
+            self.env_seed = random.randint(0, 2**31 - 1)
+            print(f"Using random initial seed: {self.env_seed}")
+        elif isinstance(group_initial_seed_config, int):
+            # Use the provided integer seed
+            self.env_seed = group_initial_seed_config
+            print(f"Using preset initial seed: {self.env_seed}")
+        else:
+            # No seeding (None or other values)
+            self.env_seed = None
+            print("No environment seeding enabled")
+        
+        self.env_seed_counter = 0
+
+        # If GRPO is used, freeze_completed_episodes must be true and explicit env_seed must be set
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+            self.seed_group_size = getattr(self.config.envs, 'group_rollout_size', None)
+            if self.seed_group_size is None:
+                self.seed_group_size = self.config.envs.n_rollouts
+                print(f"Warning: seed_group_size not set, using n_rollouts ({self.seed_group_size}), all rollouts will be in the same group")
+            if not self.freeze_completed_episodes:
+                self.freeze_completed_episodes = True
+                print(f"Warning: freeze_completed_episodes is false but is required for GRPO, setting to True")
+            if self.env_seed is None:
+                self.env_seed = 0
+                print(f"Warning: env_seed not set but is required for GRPO, using 0")
+        else:
+            self.seed_group_size = None
+            
+
         # define in-reward KL control
         # kl loss control currently not suppoorted
         if config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
 
         if self.config.algorithm.adv_estimator == AdvantageEstimator.GAE:
+            print(f"[RayPPOTrainer] Using GAE as advantage estimator, using critic")
             self.use_critic = True
         elif self.config.algorithm.adv_estimator in [
                 AdvantageEstimator.GRPO, AdvantageEstimator.REINFORCE_PLUS_PLUS, AdvantageEstimator.REMAX,
                 AdvantageEstimator.RLOO, AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE
         ]:
+            print(f"[RayPPOTrainer] Using {self.config.algorithm.adv_estimator} as advantage estimator, not using critic")
             self.use_critic = False
         else:
             raise NotImplementedError
@@ -305,19 +347,53 @@ class RayPPOTrainer(object):
             from verl.envs.environments import make_env
             from verl.envs.captioners import make_captioner
             from verl.envs.vec_env import VecEnv
+
             def get_env_fn(rank):
                 def init_env():
-                    return make_env(env_name, task, config, render_mode=render_mode)
+                    env = make_env(env_name, task, config, render_mode=render_mode)
+                    return env
                 return init_env
+
             def get_captioner_fn(rank):
                 def init_captioner():
                     return make_captioner(config)
                 return init_captioner
+
+            # duplication_mode = config.get("duplication_mode", "none") # Default to none
+            env_fns = [get_env_fn(i) for i in range(config.envs.n_rollouts)]
+            captioner_fns = [get_captioner_fn(i) for i in range(config.envs.n_rollouts)]
+           
+            # def get_env_fn_replication(initial_state):
+            #     def init_env():
+            #         env = make_env(env_name, task, config, render_mode=render_mode)
+            #         env.set_state(initial_state) # Assuming env has a set_state() method
+            #         return env
+            #     return init_env
+
+            # def get_env_fn_deepcopy(source_env):
+            #     def init_env():
+            #         return copy.deepcopy(source_env)
+            #     return init_env
+            # elif duplication_mode == "replication":
+            #     # Create a single environment to capture its initial state
+            #     source_env = make_env(env_name, task, config, render_mode=render_mode)
+            #     initial_state = source_env.get_state()
+            #     source_env.close()
+            # elif duplication_mode == "copy":
+            #     # Create a single environment to deepcopy
+            #     source_env = make_env(env_name, task, config, render_mode=render_mode)
+                
+            #     # Create a list of functions that deepcopy the source environment
+            #     env_fns = [get_env_fn_deepcopy(source_env) for _ in range(config.envs.n_rollouts)]
+            #     captioner_fns = [get_captioner_fn(i) for i in range(config.envs.n_rollouts)]
+            # else:
+            #     raise ValueError(f"Invalid duplication_mode: {duplication_mode}")
+
             env = VecEnv(
                 env_name=env_name,
                 config=config,
-                env_fns=[get_env_fn(i) for i in range(config.envs.n_rollouts)],
-                captioner_fns=[get_captioner_fn(i) for i in range(config.envs.n_rollouts)],
+                env_fns=env_fns,
+                captioner_fns=captioner_fns,
             )
             return env
         
@@ -334,6 +410,41 @@ class RayPPOTrainer(object):
             config, 
             render_mode=None
         )
+        
+        # Initialize multi-environment evaluator if evaluation config is present
+        print(f"[RayPPOTrainer] Checking evaluation config...")
+        print(f"[RayPPOTrainer] hasattr(config, 'evaluation'): {hasattr(config, 'evaluation')}")
+        print(f"[RayPPOTrainer] hasattr(config, 'eval'): {hasattr(config, 'eval')}")
+        
+        # Check both possible locations for evaluation config
+        eval_config = None
+        if hasattr(config, 'evaluation') and hasattr(config.evaluation, 'environments'):
+            eval_config = config.evaluation
+            print(f"[RayPPOTrainer] Found evaluation config at config.evaluation")
+        elif hasattr(config, 'eval') and hasattr(config.eval, 'evaluation') and hasattr(config.eval.evaluation, 'environments'):
+            eval_config = config.eval.evaluation
+            print(f"[RayPPOTrainer] Found evaluation config at config.eval.evaluation")
+        
+        if eval_config is not None:
+            print(f"[RayPPOTrainer] Initializing MultiEnvEvaluator with {len(eval_config.environments)} environments")
+            self.multi_env_evaluator = MultiEnvEvaluator(
+                config=config,
+                tokenizer=tokenizer,
+                actor_rollout_wg=None,  # Will be set after init_workers
+                val_reward_fn=val_reward_fn,
+                eval_config=eval_config  # Pass the evaluation config directly
+            )
+        else:
+            print(f"[RayPPOTrainer] No evaluation config found, setting multi_env_evaluator to None")
+            self.multi_env_evaluator = None
+
+    def get_next_env_seed(self):
+        """Get the next seed for environment reset, incrementing the counter."""
+        if self.env_seed is not None:
+            seed = self.env_seed + self.env_seed_counter
+            self.env_seed_counter += 10_000
+            return seed
+        return None
 
     def _validate_config(self):
         config = self.config
@@ -541,12 +652,14 @@ class RayPPOTrainer(object):
         samples = samples[:generations_to_log]
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps, table_name="val_gen/generations")
 
     def _validate(self):
 
         max_seq_len = self.config.data.max_prompt_length
-        val_obs, val_info = self.val_env.reset()
+        # For validation, use the base seed if configured, or None for random
+        val_seed = self.env_seed-10_000 if self.env_seed is not None else 0
+        val_obs, val_info = self.val_env.reset(seed=val_seed, use_incremental_seeds=True)
         
         # Lists to collect samples for the table
         sample_inputs = []
@@ -595,12 +708,13 @@ class RayPPOTrainer(object):
                 end_of_traj = np.logical_or(val_terminated, val_truncated)
                 rew_of_traj = val_reward
                 len_of_traj = np.ones_like(val_reward)
+                pos_rew_of_traj = (np.array(val_reward) > 0.) * 1.
             else:
                 done = np.logical_or(val_terminated, val_truncated)
                 rew_of_traj += val_reward * (~end_of_traj).astype(np.float32)
                 len_of_traj += (~end_of_traj).astype(np.float32)
                 end_of_traj = np.logical_or(end_of_traj, done)
-            
+                pos_rew_of_traj = np.logical_or(pos_rew_of_traj, (np.array(val_reward) > 0.) * 1.)
             sample_scores.extend(rew_of_traj)
             
             if end_of_traj.all():
@@ -611,9 +725,14 @@ class RayPPOTrainer(object):
         succ_of_traj = (np.array(rew_of_traj) > 0.) * 1.
         
         metric_dict = {
-            "val-rewards": rew_of_traj.mean(),
-            "val-success": succ_of_traj.mean(),
-            "val-traj_length": len_of_traj.mean(),
+            "val/rewards_mean": rew_of_traj.mean(),
+            "val/pos_reward_total_prop_mean": succ_of_traj.mean(),
+            "val/traj_length_mean": len_of_traj.mean(),
+            "val/pos_reward_any_prop_mean": pos_rew_of_traj.mean(),
+            "val/rewards_std": rew_of_traj.std(),
+            "val/pos_reward_total_prop_std": succ_of_traj.std(),
+            "val/traj_length_std": len_of_traj.std(),
+            "val/pos_reward_any_prop_std": pos_rew_of_traj.std(),
         }
 
         return metric_dict
@@ -690,6 +809,11 @@ class RayPPOTrainer(object):
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
+        
+        # Set the actor_rollout_wg reference in the multi-environment evaluator
+        if self.multi_env_evaluator is not None:
+            print(f"[RayPPOTrainer] Setting actor_rollout_wg in multi_env_evaluator")
+            self.multi_env_evaluator.actor_rollout_wg = self.actor_rollout_wg
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -819,7 +943,8 @@ class RayPPOTrainer(object):
         logger = Tracking(project_name=self.config.trainer.project_name,
                           experiment_name=self.config.trainer.experiment_name,
                           default_backend=self.config.trainer.logger,
-                          config=OmegaConf.to_container(self.config, resolve=True))
+                          config=OmegaConf.to_container(self.config, resolve=True),
+                          group=self.config.trainer.get('group', None))
 
         self.global_steps = 0
 
@@ -829,9 +954,22 @@ class RayPPOTrainer(object):
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
-            val_metrics = self._validate()
-            pprint(f'Initial validation metrics: {val_metrics}')
-            logger.log(data=val_metrics, step=self.global_steps)
+            print(f"[RayPPOTrainer] Starting initial validation at global_step={self.global_steps}")
+            if self.multi_env_evaluator is not None:
+                print(f"[RayPPOTrainer] Using multi_env_evaluator initial evaluation")
+                evaluation_metrics = self.multi_env_evaluator.evaluate(self.global_steps)
+                print(f"[RayPPOTrainer] Initial evaluation completed. Metrics keys: {list(evaluation_metrics.keys())}")
+                pprint(f'Initial evaluation metrics: {evaluation_metrics}')
+                print(f"[RayPPOTrainer] Logging {len(evaluation_metrics)} metrics to logger")
+                logger.log(data=evaluation_metrics, step=self.global_steps)
+
+            print(f"[RayPPOTrainer] Using standard _validate for initial validation")
+            validation_metrics = self._validate()
+            print(f"[RayPPOTrainer] Initial validation completed. Metrics keys: {list(validation_metrics.keys())}")
+            pprint(f'Initial validation metrics: {validation_metrics}')
+            print(f"[RayPPOTrainer] Logging {len(validation_metrics)} metrics to logger")
+            logger.log(data=validation_metrics, step=self.global_steps)
+
             if self.config.trainer.get('val_only', False):
                 return
 
@@ -840,7 +978,7 @@ class RayPPOTrainer(object):
 
         # we start from step 1
         self.global_steps += 1
-        last_val_metrics = None
+        last_val_metrics = {}
         
         if self.config.trainer.render:
             
@@ -901,6 +1039,12 @@ class RayPPOTrainer(object):
         
         for epoch in range(self.config.trainer.total_epochs):
             
+                # Reset environments with appropriate seeding strategy
+                if self.env_seed is not None:
+                    seed = self.get_next_env_seed()
+                    # Use seed_group_size for GRPO to ensure proper grouping
+                    obs, info = self.env.reset(seed=seed, seed_group_size=self.seed_group_size)
+            
                 self.critic_warmup_step = self.config.trainer.critic_warmup_step # TODO: move to the config file
                 if self.global_steps <= self.critic_warmup_step:
                     bsize = self.config.data.train_batch_size * self.config.trainer.critic_warmup
@@ -924,6 +1068,7 @@ class RayPPOTrainer(object):
                         "extra_info": np.zeros([bsize]),
                         "raw_prompt_ids": np.zeros([bsize]),
                         "index": np.zeros([bsize]),
+                        "frozen_mask": np.zeros([bsize + esize], dtype=np.int64),
                     }
         
                 metrics = {}
@@ -941,6 +1086,13 @@ class RayPPOTrainer(object):
                     episode_len = bsize // self.config.envs.n_rollouts
                     
                     if self.global_steps == 1 or self.global_steps > self.critic_warmup_step:
+                        
+                        # Initialize episode tracking for freezing logic
+                        # This prevents cross-batch episode issues by freezing environments when episodes complete
+                        # Frozen environments receive "__SKIP__" actions and return cached data
+                        if self.freeze_completed_episodes:
+                            # Track which environments have completed episodes
+                            env_frozen = np.zeros(self.config.envs.n_rollouts, dtype=bool)
                         
                         for time_step in range(episode_len+1):
                             
@@ -973,29 +1125,144 @@ class RayPPOTrainer(object):
                                 break
                                 
                             gen_batch.meta_info["step"] = time_step if time_step < episode_len - 1 else -1
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                             
-                            response_ids = gen_batch_output.batch['responses']
-                            actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                            # Handle episode freezing logic
+                            if self.freeze_completed_episodes:
+                                # Only generate actions for non-frozen environments
+                                active_envs = ~env_frozen
+                                if np.any(active_envs):
+                                    # Filter observations for active environments only
+                                    active_obs_data = {}
+                                    for key in gen_batch.batch.keys():
+                                        active_obs_data[key] = gen_batch.batch[key][active_envs]
+                                    
+                                    active_gen_batch = DataProto.from_dict(tensors=active_obs_data)
+                                    active_gen_batch.meta_info = gen_batch.meta_info.copy()
+                                    
+                                    active_gen_batch_output = self.actor_rollout_wg.generate_sequences(active_gen_batch)
+                                    
+                                    # Decode actions for active environments
+                                    active_response_ids = active_gen_batch_output.batch['responses']
+                                    active_actions = self.tokenizer.batch_decode(active_response_ids, skip_special_tokens=True)
+                                    
+                                    # Create full action array with skip actions for frozen environments
+                                    actions = ['__SKIP__'] * self.config.envs.n_rollouts
+                                    active_idx = 0
+                                    for i in range(self.config.envs.n_rollouts):
+                                        if active_envs[i]:
+                                            actions[i] = active_actions[active_idx]
+                                            active_idx += 1
+                                else:
+                                    actions = ['__SKIP__'] * self.config.envs.n_rollouts
+                            else:
+                                # Original behavior when freezing is disabled
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                                response_ids = gen_batch_output.batch['responses']
+                                actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                             
                             obs, reward, terminated, truncated, info = self.env.step(actions)
                             
                             done = np.logical_or(terminated, truncated)
-                            
+                                                    
                             for key in info.keys():
                                 if key in metrics:
                                     metrics[key].append(info[key])
                                 else:
                                     metrics[key] = [info[key]]
                             
-                            gen_batch_output.batch["done"] = done # TODO: check correctness
-                            gen_batch_output.batch["reward"] = reward
+                            # Handle batch insertion based on freezing logic
+                            if self.freeze_completed_episodes:
+                                # Create batch output for all environments (including frozen ones)
+                                if 'active_gen_batch_output' in locals() and np.any(active_envs):
+                                    # Create full batch output with correct dimensions from the start
+                                    # We need to create a batch with n_rollouts elements, preserving the exact ordering
+                                    
+                                    # First, create the full batch structure with correct dimensions
+                                    full_batch_dict = {}
+                                    
+                                    # Initialize all tensors with the correct batch size (n_rollouts)
+                                    for key in active_gen_batch_output.batch.keys():
+                                        # Create full tensor with correct dimensions for all keys
+                                        full_data = torch.zeros((self.config.envs.n_rollouts, *active_gen_batch_output.batch[key].shape[1:]), dtype=active_gen_batch_output.batch[key].dtype)
+                                        
+                                        # Fill in the data for active environments at their correct indices
+                                        active_idx = 0
+                                        for i in range(self.config.envs.n_rollouts):
+                                            if active_envs[i]:
+                                                full_data[i] = active_gen_batch_output.batch[key][active_idx]
+                                                active_idx += 1
+                                            # For frozen environments, leave as zeros (must be 0 for attention mask, otherwise just dummy data)
+                                        
+                                        full_batch_dict[key] = full_data
+                                    
+                                    # Create the full batch output with correct dimensions and preserved ordering
+                                    full_batch_output = DataProto.from_dict(tensors=full_batch_dict)
+                                    full_batch_output.meta_info = active_gen_batch_output.meta_info.copy()
+                                    
+                                    # Set done and reward for all environments
+                                    # For frozen environments, ensure done=True for proper GAE behavior
+                                    # full_done = done.copy()
+                                    # full_done[env_frozen] = True  # Force done=True for frozen environments
+                                    full_batch_output.batch["done"] = torch.tensor(done, dtype=torch.float64)
+                                    full_batch_output.batch["reward"] = torch.tensor(reward, dtype=torch.float64)
+                                    full_batch_output.batch["frozen_mask"] = torch.tensor(env_frozen, dtype=torch.int64)
+                                    
+                                    batch.insert(
+                                        full_batch_output,
+                                        start_idx = time_step * self.config.envs.n_rollouts,
+                                        end_idx = (time_step + 1) * self.config.envs.n_rollouts,
+                                    )
+                                else:
+                                    # All environments frozen, create dummy batch with correct dimensions
+                                    # Create dummy batch with proper dimensions for all environments
+                                    dummy_batch_dict = {}
+                                    
+                                    # Create dummy tensors with correct dimensions
+                                    # The batch expects specific dimensions: plen + rlen for input tensors, rlen for responses
+                                    plen = self.config.data.max_prompt_length
+                                    rlen = self.config.data.max_response_length
+                                    
+                                    for key in gen_batch.batch.keys():
+                                        if key == 'responses':
+                                            # Responses should have max_response_length dimension
+                                            dummy_batch_dict[key] = torch.zeros((self.config.envs.n_rollouts, rlen), dtype=torch.long)
+                                        else:
+                                            # For other keys (input_ids, attention_mask, position_ids), use plen + rlen dimensions
+                                            dummy_batch_dict[key] = torch.zeros((self.config.envs.n_rollouts, plen + rlen), dtype=gen_batch.batch[key].dtype)
+                                    
+                                    # Add the required fields
+                                    dummy_batch_dict["done"] = torch.zeros(self.config.envs.n_rollouts, dtype=torch.float64)
+                                    dummy_batch_dict["reward"] = torch.zeros(self.config.envs.n_rollouts, dtype=torch.float64)
+                                    dummy_batch_dict["frozen_mask"] = torch.ones(self.config.envs.n_rollouts, dtype=torch.int64)
+                                    
+                                    # Create the dummy batch
+                                    dummy_batch = DataProto.from_dict(tensors=dummy_batch_dict)
+                                    dummy_batch.meta_info = gen_batch.meta_info.copy()
+                                    
+                                    batch.insert(
+                                        dummy_batch,
+                                        start_idx = time_step * self.config.envs.n_rollouts,
+                                        end_idx = (time_step + 1) * self.config.envs.n_rollouts,
+                                    )
+                            else:
+                                # Original behavior when freezing is disabled
+                                gen_batch_output.batch["done"] = torch.tensor(done, dtype=torch.float64)
+                                gen_batch_output.batch["reward"] = torch.tensor(reward, dtype=torch.float64)
+                                gen_batch_output.batch["frozen_mask"] = torch.zeros(self.config.envs.n_rollouts, dtype=torch.int64)
+
+                                if self.config.envs.group_rollout_size is not None and dtype(self.config.envs.group_rollout_size) == int:
+                                    gen_batch_output.batch["uid"] = np.array([i // self.config.envs.group_rollout_size for i in range(self.config.envs.n_rollouts)])
+                                
+                                batch.insert(
+                                    gen_batch_output,
+                                    start_idx = time_step * self.config.envs.n_rollouts,
+                                    end_idx = (time_step + 1) * self.config.envs.n_rollouts,
+                                )
                             
-                            batch.insert(
-                                gen_batch_output,
-                                start_idx = time_step * self.config.envs.n_rollouts,
-                                end_idx = (time_step + 1) * self.config.envs.n_rollouts,
-                            )
+                            # Update any newly completed episodes to be frozen
+                            if self.freeze_completed_episodes:
+                                # Freeze environments that have completed episodes
+                                env_frozen = np.logical_or(env_frozen, done)
                         
                         # merge batch metrics
                         for key in metrics.keys():
@@ -1016,9 +1283,15 @@ class RayPPOTrainer(object):
                             batch.batch['reward_baselines'] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
-
-                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
+                    
+                    if self.config.envs.group_rollout_size is None:
+                        batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                                 dtype=object)
+                    else:
+                        step_uids = np.array([i // self.config.envs.group_rollout_size for i in range(self.config.envs.n_rollouts)])
+                        full_uids = np.repeat(step_uids, episode_len+1)
+                        batch.non_tensor_batch['uid'] = full_uids
+
                     # # repeat to align with repeated responses in rollout
                     # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     # batch = batch.union(gen_batch_output)
@@ -1072,7 +1345,8 @@ class RayPPOTrainer(object):
                                                     step_lam=self.config.algorithm.step_lam,
                                                     token_gamma=self.config.algorithm.token_gamma,
                                                     token_lam=self.config.algorithm.token_lam,
-                                                    n_rollouts=self.config.envs.n_rollouts)
+                                                    n_rollouts=self.config.envs.n_rollouts,
+                                                    group_all=self.config.envs.group_rollout_size is None)
 
                     if self.global_steps > self.critic_warmup_step:
                         batch4train = deepcopy(batch)
@@ -1109,16 +1383,28 @@ class RayPPOTrainer(object):
                         metrics.update(actor_output_metrics)
 
                     # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and (self.global_steps > self.critic_warmup_step):
+                    # Use evaluation test_freq if available, otherwise fall back to trainer test_freq
+                    eval_test_freq = getattr(self.config.evaluation, 'test_freq', None) if hasattr(self.config, 'evaluation') else None
+                    test_freq = eval_test_freq if eval_test_freq is not None else self.config.trainer.test_freq
+                    
+                    if self.val_reward_fn is not None and test_freq > 0 and \
+                        (is_last_step or self.global_steps % test_freq == 0) and (self.global_steps > self.critic_warmup_step):
+                        print(f"[RayPPOTrainer] Starting periodic validation at global_step={self.global_steps}")
                         with _timer('testing', timing_raw):
-                            val_metrics: dict = self._validate()
+                            if self.multi_env_evaluator is not None:
+                                evaluation_metrics: dict = self.multi_env_evaluator.evaluate(self.global_steps)
+                                print(f"[RayPPOTrainer] Periodic evaluation completed. Metrics keys: {list(evaluation_metrics.keys())}")
+                                logger.log(data=evaluation_metrics, step=self.global_steps)
+                                if is_last_step:
+                                    last_val_metrics.update(evaluation_metrics)
+                            validation_metrics: dict = self._validate()
+                            print(f"[RayPPOTrainer] Periodic validation completed. Metrics keys: {list(validation_metrics.keys())}")
                             if is_last_step:
-                                last_val_metrics = val_metrics
-                        metrics.update(val_metrics)
+                                last_val_metrics.update(validation_metrics)
+                        metrics.update(validation_metrics)
 
-                    if self.config.trainer.save_freq > 0 and ( is_last_step or \
-                            self.global_steps % self.config.trainer.save_freq == 0):
+                    # Save checkpoint periodically or always save final checkpoint
+                    if (self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0) or is_last_step:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 

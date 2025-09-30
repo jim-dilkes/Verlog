@@ -11,21 +11,21 @@ ACTIONS = {
 }
 
 
-def get_instruction_prompt(env, mission="BabyAI-MixedTrainLocal-v0"):
-    action_strings = ",\n".join(f"{action}: {description}" for action, description in ACTIONS.items())
+def get_instruction_prompt(env, mission):
+    action_strings = ",\n".join(f"\"{action}\": {description}" for action, description in ACTIONS.items())
 
     instruction_prompt = f"""
-You are an agent playing a simple navigation game. Your goal is to {mission}. The following are the possible actions you can take in the game, followed by a short description of each action:
+[Instructions]
+You are a helpful assistant. You always respond by wrapping your thoughts in the correct XML tags. Your maximum response length: 200 words (tokens)
+You are an agent playing a simple navigation game. 
+If there is a desired object you want to interact with or pickup in front of you, you can use the 'toggle' action to interact with it.
 
-{action_strings}.
+[Available Actions]
+{action_strings}
 
-In a moment I will present you an observation.
-
-Tips:
-- Once the desired object you want to interact or pickup in front of you, you can use the 'toggle' action to interact with it.
-- It doesn't make sense to repeat the same action over and over if the observation doesn't change.
-
-PLAY!
+[Rules]
+- Your goal is to {mission}. 
+- You cannot see the entire map, you may need to explore to find relevant objects.
 """.strip()
 
     return instruction_prompt

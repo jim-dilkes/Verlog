@@ -39,31 +39,42 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
         if self.binary_reward:
             reward = 1.0 if reward > 0 else reward
         return obs, reward*1.0, terminated, truncated, info
+
+    @staticmethod
+    def extract_action_from_xml_tag(text: str, tag: str = "action") -> str:
+        """Extract action from XML-style tags like <{tag}>UP</{tag}>."""
+        try:
+            return text.split(f"<{tag}>")[1].split(f"</{tag}>")[0].strip().lower()
+        except (IndexError, AttributeError):
+            return None
     
     def extract_action(self, action):
         
         full_action = str(action)
+        action = BabyAILLMAgentsWrapper.extract_action_from_xml_tag(full_action)
         
-        if "ACTION:" in action:
-            action = action.split("ACTION:")[-1].strip()
-        elif "action:" in action:
-            action = action.split("action:")[-1].strip()
-        elif "Action" in action:
-            action = action.split("Action")[-1].strip()
+        # if "ACTION:" in action:
+        #     action = action.split("ACTION:")[-1].strip()
+        # elif "action:" in action:
+        #     action = action.split("action:")[-1].strip()
+        # elif "Action" in action:
+        #     action = action.split("Action")[-1].strip()
             
-        lower_pred_action = action.lower()
-        
-        lower_pred_action = lower_pred_action.replace("_", " ")
-        if lower_pred_action == "turnleft":
-            lower_pred_action = "turn left"
-        elif lower_pred_action == "turnright":
-            lower_pred_action = "turn right"
-        elif lower_pred_action == "goforward":
-            lower_pred_action = "go forward"
-        elif lower_pred_action == "pickup":
-            lower_pred_action = "pick up"
+
+        if action is not None and type(action) == str:
+            lower_pred_action = action.lower()
             
-        action = lower_pred_action
+            lower_pred_action = lower_pred_action.replace("_", " ")
+            if lower_pred_action == "turnleft":
+                lower_pred_action = "turn left"
+            elif lower_pred_action == "turnright":
+                lower_pred_action = "turn right"
+            elif lower_pred_action == "goforward":
+                lower_pred_action = "go forward"
+            elif lower_pred_action == "pickup":
+                lower_pred_action = "pick up"
+            
+            action = lower_pred_action
         
         valid_action = action if action in self.language_action_space else self.default_action
         

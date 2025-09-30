@@ -25,7 +25,7 @@ def make_env(env_name, task, config, render_mode=None):
 
         base_env = make_nle_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "minihack":
-        from verl.envs.environments.minihack.minihack_env import make_minihack_env
+        from verl.evs.environments.minihack.minihack_env import make_minihack_env
 
         base_env = make_minihack_env(env_name, task, config, render_mode=render_mode)
     elif env_name == "babyai":
@@ -42,6 +42,14 @@ def make_env(env_name, task, config, render_mode=None):
     elif env_name == "babaisai":
         from verl.envs.environments.babaisai.babaisai_env import make_babaisai_env
         base_env = make_babaisai_env(env_name, task, config, render_mode=render_mode)
+        
+    elif env_name == "fastsnake":
+        from verl.envs.environments.FastSnake.fastsnake_env import make_fastsnake_env
+        base_env = make_fastsnake_env(env_name, task, config, render_mode=render_mode)
+        
+    elif env_name == "frozenlake":
+        from verl.envs.environments.FrozenLake.frozen_lake_env import make_frozenlake_env
+        base_env = make_frozenlake_env(env_name, task, config, render_mode=render_mode)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     

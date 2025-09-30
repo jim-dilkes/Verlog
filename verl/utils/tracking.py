@@ -24,7 +24,7 @@ from typing import List, Union, Dict, Any
 class Tracking(object):
     supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = 'console', config=None):
+    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = 'console', config=None, group=None):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
         for backend in default_backend:
@@ -38,7 +38,7 @@ class Tracking(object):
 
         if 'tracking' in default_backend or 'wandb' in default_backend:
             import wandb
-            wandb.init(project=project_name, name=experiment_name, config=config)
+            wandb.init(project=project_name, name=experiment_name, config=config, group=group)
             self.logger['wandb'] = wandb
 
         if 'mlflow' in default_backend:
@@ -180,28 +180,33 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
 @dataclasses.dataclass
 class ValidationGenerationsLogger:
 
-    def log(self, loggers, samples, step):
+    def __init__(self):
+        # Dictionary to store separate table instances for each table name
+        self.validation_tables = {}
+
+    def log(self, loggers, samples, step, table_name):
         if 'wandb' in loggers:
-            self.log_generations_to_wandb(samples, step)
+            self.log_generations_to_wandb(samples, step, table_name)
         if 'swanlab' in loggers:
             self.log_generations_to_swanlab(samples, step)
         if 'mlflow' in loggers:
             self.log_generations_to_mlflow(samples, step)
 
-    def log_generations_to_wandb(self, samples, step):
+    def log_generations_to_wandb(self, samples, step, table_name):
         """Log samples to wandb as a table"""
         import wandb
 
         # Create column names for all samples
         columns = ["step"] + sum([[f"input_{i+1}", f"output_{i+1}", f"score_{i+1}"] for i in range(len(samples))], [])
 
-        if not hasattr(self, 'validation_table'):
-            # Initialize the table on first call
-            self.validation_table = wandb.Table(columns=columns)
+        # Use table_name as key to maintain separate tables for each environment
+        if table_name not in self.validation_tables:
+            # Initialize the table on first call for this table name
+            self.validation_tables[table_name] = wandb.Table(columns=columns)
 
         # Create a new table with same columns and existing data
         # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
-        new_table = wandb.Table(columns=columns, data=self.validation_table.data)
+        new_table = wandb.Table(columns=columns, data=self.validation_tables[table_name].data)
 
         # Add new row with all data
         row_data = []
@@ -212,8 +217,8 @@ class ValidationGenerationsLogger:
         new_table.add_data(*row_data)
 
         # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
-        self.validation_table = new_table
+        wandb.log({table_name: new_table}, step=step)
+        self.validation_tables[table_name] = new_table
 
     def log_generations_to_swanlab(self, samples, step):
         """Log samples to swanlab as text"""

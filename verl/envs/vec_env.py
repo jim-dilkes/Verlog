@@ -54,21 +54,124 @@ class VecEnv:
         
         for remote in self.work_remotes:
             remote.close()
+        
+        
+        # Cache for storing last known state of environments (for skip functionality)
+        self.last_obs = [None] * self.n_rollouts
+        self.last_reward = [0.0] * self.n_rollouts
+        self.last_terminated = [False] * self.n_rollouts
+        self.last_truncated = [False] * self.n_rollouts
+        self.last_info = [{"metrics": {}}] * self.n_rollouts
             
     def step(self, actions):
-        for remote, action in zip(self.remotes, actions):
-            remote.send(('step', action))
-        results = [remote.recv() for remote in self.remotes]
-        obs, rews, terminated, truncated, infos = zip(*results)
+        # Handle skip actions for frozen environments
+        skip_action = "__SKIP__"
+        active_remotes = []
+        active_actions = []
+        skip_indices = []
+        
+        for i, (remote, action) in enumerate(zip(self.remotes, actions)):
+            if action == skip_action:
+                skip_indices.append(i)
+            else:
+                active_remotes.append(remote)
+                active_actions.append(action)
+        
+        # Only send step commands to active environments
+        for i, (remote, action) in enumerate(zip(active_remotes, active_actions)):
+            try:
+                remote.send(('step', action))
+            except BrokenPipeError as e:
+                print(f"[ERROR] VecEnv.step: BrokenPipeError when sending to worker {i}: {e}")
+                raise RuntimeError("Worker process connection broken during step. Check for errors in worker processes.")
+        
+        # Collect results from active environments
+        active_results = []
+        for i, remote in enumerate(active_remotes):
+            try:
+                result = remote.recv()
+                # Check if worker sent an error
+                if isinstance(result, tuple) and len(result) > 0 and result[0] == 'error':
+                    print(f"[ERROR] VecEnv.step: Worker {i} sent error: {result[1]}")
+                    raise RuntimeError(f"Worker {i} error: {result[1]}")
+                
+                active_results.append(result)
+            except Exception as e:
+                print(f"[ERROR] VecEnv.step: Exception receiving from worker {i}: {e}")
+                raise
+        
+        # Reconstruct full results with cached data for skipped environments
+        full_results = []
+        active_idx = 0
+        for i in range(len(self.remotes)):
+            if i in skip_indices:
+                # Return cached data for skipped environments
+                full_results.append((
+                    self.last_obs[i],
+                    self.last_reward[i],
+                    self.last_terminated[i],
+                    self.last_truncated[i],
+                    self.last_info[i]
+                ))
+            else:
+                full_results.append(active_results[active_idx])
+                active_idx += 1
+        
+        obs, rews, terminated, truncated, infos = zip(*full_results)
+
+        
+        # Update cache with current results
+        for i in range(len(self.remotes)):
+            self.last_obs[i] = obs[i]
+            self.last_reward[i] = rews[i]
+            self.last_terminated[i] = terminated[i]
+            self.last_truncated[i] = truncated[i]
+            self.last_info[i] = infos[i]
         
         infos = merge_metrics(infos)
         
         return obs, np.stack(rews), np.stack(terminated), np.stack(truncated), infos
     
-    def reset(self):
-        for remote in self.remotes:
-            remote.send(('reset', None))
+    def reset(self, seed=None, seed_group_size=None, use_incremental_seeds=False):
+        """
+        Reset all environments with seeds.
+        
+        Args:
+            seed: Base seed for resetting environments
+            seed_group_size: If provided, group successive sets of this many rollouts to have the same seed.
+                           Each group gets seed + group_index. Must divide n_rollouts evenly.
+            use_incremental_seeds: If True, each worker gets seed + worker_rank (for evaluation).
+                                 If False, all workers get the same seed (for GRPO training).
+        """
+        if seed_group_size is not None and self.n_rollouts % seed_group_size != 0:
+            raise ValueError("n_rollouts must be divisible by seed_group_size")
+
+        for i, remote in enumerate(self.remotes):
+            try:
+                if use_incremental_seeds and seed is not None:
+                    # Create unique seed for each worker: base_seed + worker_rank (for evaluation)
+                    worker_seed = seed + i
+                elif seed_group_size is not None and seed is not None:
+                    # Group successive sets of seed_group_size rollouts to have the same seed
+                    group_index = i // seed_group_size
+                    worker_seed = seed + group_index
+                else:
+                    # Use the same seed for all workers (for GRPO training)
+                    worker_seed = seed
+                remote.send(('reset', worker_seed))
+            except Exception as e:
+                raise RuntimeError(f"Error resetting environment {i}: {e}")
+        
         observations, infos = zip(*[remote.recv() for remote in self.remotes])
+        
+        # Update cache with reset results
+        for i in range(len(self.remotes)):
+            self.last_obs[i] = observations[i]
+            self.last_reward[i] = 0.0
+            self.last_terminated[i] = False
+            self.last_truncated[i] = False
+            self.last_info[i] = infos[i]
+        
         return observations, infos
     
     def render(self):
@@ -89,24 +192,42 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
     np.random.seed(rank)
     
     parent_remote.close()
-    env = env_fn_wrapper.x()
-    captioner = captioner_fn_wrapper.x()
+    try:
+        env = env_fn_wrapper.x()
+    except Exception as e:
+        print(f"[ERROR] Worker {rank}: Failed to create environment: {e}")
+        raise
+    
+    try:
+        captioner = captioner_fn_wrapper.x()
+    except Exception as e:
+        print(f"[ERROR] Worker {rank}: Failed to create captioner: {e}")
+        raise
+    
     image = None
     
     def env_step(action):
-        full_action, executed_action, is_valid, metrics = env.extract_action(action)
-        env_obs, reward, terminated, truncated, info = env.step(executed_action, is_valid)
-        image = env_obs.get("image", None)
-        instructions = env_obs["mission"]  if env_name == "babyai" else None
-        inst_prompt = env.get_instruction_prompt(instructions=instructions, info=info)
-        captioner.prompt_builder.update_instruction_prompt(inst_prompt)
-        captioner.update_action(full_action, executed_action)
-        info["metrics"] = metrics
-        return captioner.get_obs(env_obs), reward, terminated, truncated, info, image
+        try:
+            full_action, executed_action, is_valid, metrics = env.extract_action(action)
+            
+            env_obs, reward, terminated, truncated, info = env.step(executed_action, is_valid)
+            
+            image = env_obs.get("image", None)
+            instructions = env_obs["mission"]  if env_name == "babyai" else None
+            inst_prompt = env.get_instruction_prompt(instructions=instructions, info=info)
+            captioner.prompt_builder.update_instruction_prompt(inst_prompt)
+            captioner.update_action(full_action, executed_action)
+            info["metrics"] = metrics
+            return captioner.get_obs(env_obs), reward, terminated, truncated, info, image
+        except Exception as e:
+            print(f"[ERROR] Worker {rank}: Exception in env_step: {e}")
+            import traceback
+            print(f"[ERROR] Worker {rank}: Traceback: {traceback.format_exc()}")
+            raise
 
-    def env_reset():
+    def env_reset(seed=None):
         captioner.reset()
-        env_obs, info = env.reset()
+        env_obs, info = env.reset(seed=seed)
         image = env_obs.get("image", None)
         instructions = env_obs["mission"]  if env_name == "babyai" else None
         inst_prompt = env.get_instruction_prompt(instructions=instructions)
@@ -114,23 +235,42 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
         return captioner.get_obs(env_obs), info, image
         
     while True:
-        cmd, data = remote.recv()
-        if cmd == 'step':
-            obs, reward, terminated, truncated, info, image = env_step(data)
-            if terminated or truncated:
-                obs, _, image = env_reset()
-            remote.send((obs, reward, terminated, truncated, info))
-        elif cmd == 'reset':
-            obs, info, image = env_reset()
-            remote.send((obs, info))
-        elif cmd == 'render':
-            remote.send(image)
-        elif cmd == 'close':
-            env.close()
-            remote.close()
+        try:
+            cmd, data = remote.recv()
+            
+            if cmd == 'step':
+                obs, reward, terminated, truncated, info, image = env_step(data)
+                if terminated or truncated:
+                    obs, _, image = env_reset(seed=None)  
+                remote.send((obs, reward, terminated, truncated, info))
+                
+            elif cmd == 'reset':
+                seed = data
+                obs, info, image = env_reset(seed=seed)
+                remote.send((obs, info))
+                
+            elif cmd == 'render':
+                remote.send(image)
+                
+            elif cmd == 'close':
+                env.close()
+                remote.close()
+                break
+            else:
+                print(f"[ERROR] Worker {rank}: Unknown command: '{cmd}'")
+                raise NotImplementedError
+                
+        except Exception as e:
+            print(f"[ERROR] Worker {rank}: Exception in command loop: {e}")
+            import traceback
+            print(f"[ERROR] Worker {rank}: Traceback: {traceback.format_exc()}")
+            # Send error back to main process
+            try:
+                remote.send(('error', str(e)))
+            except Exception as send_error:
+                print(f"[ERROR] Worker {rank}: Failed to send error to main process: {send_error}")
+                pass  # If we can't send the error, just exit
             break
-        else:
-            raise NotImplementedError
 
         
   
