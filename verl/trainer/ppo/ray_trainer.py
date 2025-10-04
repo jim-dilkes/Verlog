@@ -1139,7 +1139,16 @@ class RayPPOTrainer(object):
                                     active_gen_batch = DataProto.from_dict(tensors=active_obs_data)
                                     active_gen_batch.meta_info = gen_batch.meta_info.copy()
                                     
-                                    active_gen_batch_output = self.actor_rollout_wg.generate_sequences(active_gen_batch)
+                                    # Pad the batch to be divisible by the number of GPUs
+                                    from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+                                    dp_size = self.actor_rollout_wg.world_size
+                                    active_gen_batch_padded, pad_size = pad_dataproto_to_divisor(active_gen_batch, dp_size)
+                                    
+                                    active_gen_batch_output = self.actor_rollout_wg.generate_sequences(active_gen_batch_padded)
+                                    
+                                    # Remove padding from the output
+                                    if pad_size > 0:
+                                        active_gen_batch_output = unpad_dataproto(active_gen_batch_output, pad_size)
                                     
                                     # Decode actions for active environments
                                     active_response_ids = active_gen_batch_output.batch['responses']
