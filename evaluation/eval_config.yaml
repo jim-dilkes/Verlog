@@ -1,0 +1,72 @@
+# Evaluation Configuration File
+# This file contains all the configurable parameters for running evaluations
+# on pre-existing models or checkpoints.
+
+# Model and Generation Parameters
+model:
+  # Generation parameters for evaluation
+  generation:
+    temperature: 0.0          # Temperature for generation (0.0 = deterministic)
+    top_k: -1                 # Top-k sampling (-1 = disabled)
+    top_p: 1.0                # Top-p sampling (1.0 = disabled)
+    do_sample: false          # Whether to use sampling (false = greedy decoding)
+    max_response_length: 256  # Maximum response length in tokens
+    max_prompt_length: 1500   # Maximum prompt length in tokens
+  
+  # Model loading parameters
+  loading:
+    trust_remote_code: false  # Whether to trust remote code in model loading
+    use_fast_tokenizer: true  # Whether to use fast tokenizer
+    torch_dtype: "bfloat16"   # Torch dtype for model loading (required for Flash Attention 2.0)
+
+# GPU and Memory Configuration
+gpu:
+  memory_utilization: 0.95
+
+# Environment Configuration (for memory management)
+environment:
+  n_rollouts: 50  # Reduce from default 100 to save memory
+
+# Ray and Infrastructure Parameters
+ray:
+  object_store_memory: 50000000000  # Ray object store memory in bytes
+  disable_import_warning: true      # Disable Ray import warnings
+  dedup_logs: false                 # Disable log deduplication
+  enable_windows_cluster: false     # Disable Windows/OSX cluster support
+
+# Environment Variables
+environment:
+  transformers_offline: true        # Use offline transformers
+  hf_datasets_offline: true         # Use offline HuggingFace datasets
+  hf_hub_offline: true              # Use offline HuggingFace hub
+  wandb_mode: "offline"             # Wandb mode (offline/online)
+  tokenizers_parallelism: "true"    # Enable tokenizers parallelism
+  nccl_debug: "WARN"                # NCCL debug level
+  vllm_logging_level: "WARN"        # VLLM logging level
+
+# SLURM Default Parameters
+slurm:
+  default_partition: "quad_h200"    # Default SLURM partition
+  default_time: "02:00:00"          # Default runtime
+  default_memory: "250GB"           # Default memory allocation
+  default_cpus: 6                   # Default CPUs per task
+  default_gpus: 1                   # Default GPUs per node
+
+# Evaluation-specific Settings
+evaluation:
+  # Disable training-specific features
+  disable_training_features: true
+  val_before_train: false
+  test_freq: -1                     # Disable periodic validation
+  save_freq: -1                     # Disable checkpoint saving
+  total_epochs: 1                   # Only run one epoch for evaluation
+  
+  # Logging settings
+  log_val_generations: 1            # Number of generations to log
+  logger: ["console", "wandb"]      # Logger backends
+
+# Paths and Directories
+paths:
+  default_output_dir: "/scratch/jsbd1n24/evaluation_results"
+  default_wandb_project: "AAMAS_msrl_base"
+  base_config_path: "Verlog/verl/trainer/config/ppo_trainer.yaml"

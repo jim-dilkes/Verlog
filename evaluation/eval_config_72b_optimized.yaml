@@ -1,0 +1,45 @@
+# Optimized Configuration for 72B Models
+# This configuration is specifically tuned for large models like Qwen2.5-72B
+
+# Model and Generation Parameters
+model:
+  generation:
+    temperature: 0.5          # Moderate temperature for diversity
+    top_k: -1                 # Top-k sampling
+    top_p: 1.0                # Top-p sampling
+    do_sample: true           # Enable sampling
+    max_response_length: 128  # Reduced from 256 to save KV cache memory
+    max_prompt_length: 1024   # Reduced from 1500 to save KV cache memory
+  
+  loading:
+    trust_remote_code: false
+    use_fast_tokenizer: true
+    torch_dtype: "bfloat16"   # Torch dtype for model loading
+
+# GPU and Memory Configuration - OPTIMIZED FOR 72B
+gpu:
+  memory_utilization: 0.95    # Keep high utilization, the issue is model size
+  # Additional vLLM memory optimizations
+  max_model_len: 2048         # Limit sequence length to reduce KV cache
+  gpu_memory_utilization: 0.95 # Explicit vLLM setting
+  # swap_space: 4               # Enable CPU offloading for KV cache
+
+# Environment Configuration (for memory management)
+environment:
+  n_rollouts: 50              # Reduced from 100 to save memory
+
+# Evaluation-specific Settings
+evaluation:
+  disable_training_features: true
+  val_before_train: false
+  test_freq: -1
+  save_freq: -1
+  total_epochs: 1
+  log_val_generations: 3      # Reduced from 5 to save memory
+  logger: ["console", "wandb"]
+
+# Paths and Directories
+paths:
+  default_output_dir: "/scratch/jsbd1n24/evaluation_results"
+  default_wandb_project: "AAMAS_msrl_base"
+  base_config_path: "Verlog/verl/trainer/config/ppo_trainer.yaml"

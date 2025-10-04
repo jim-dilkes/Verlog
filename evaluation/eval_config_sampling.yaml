@@ -1,0 +1,41 @@
+# Sampling Evaluation Configuration
+# This configuration uses sampling for more diverse generation
+
+# Model and Generation Parameters
+model:
+  generation:
+    temperature: 0.5          # Moderate temperature for diversity
+    top_k: -1                 # Top-k sampling
+    top_p: 1.0                # Top-p sampling
+    do_sample: true           # Enable sampling
+    max_response_length: 256  # Maximum response length
+    max_prompt_length: 1500   # Maximum prompt length
+  
+  loading:
+    trust_remote_code: false
+    use_fast_tokenizer: true
+    torch_dtype: "bfloat16"   # Torch dtype for model loading (required for Flash Attention 2.0)
+
+# GPU and Memory Configuration
+gpu:
+  memory_utilization: 0.95     # GPU memory utilization (0.3 = 30% of GPU memory)
+
+# Environment Configuration (for memory management)
+environment:
+  n_rollouts: 100  # Reduce from default 100 to save memory
+
+# Evaluation-specific Settings
+evaluation:
+  disable_training_features: true
+  val_before_train: false
+  test_freq: -1
+  save_freq: -1
+  total_epochs: 1
+  log_val_generations: 5      # Log more generations for sampling
+  logger: ["console", "wandb"]
+
+# Paths and Directories
+paths:
+  default_output_dir: "/scratch/jsbd1n24/evaluation_results"
+  default_wandb_project: "AAMAS_msrl_base"
+  base_config_path: "Verlog/verl/trainer/config/ppo_trainer.yaml"

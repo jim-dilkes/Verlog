@@ -1,0 +1,46 @@
+# Minimal Memory Configuration for 72B Models
+# This configuration uses minimal memory settings for maximum compatibility
+
+# Model and Generation Parameters
+model:
+  generation:
+    temperature: 0.5          # Moderate temperature for diversity
+    top_k: -1                 # Top-k sampling
+    top_p: 1.0                # Top-p sampling
+    do_sample: true           # Enable sampling
+    max_response_length: 64   # Very short responses to minimize KV cache
+    max_prompt_length: 512    # Short prompts to minimize KV cache
+  
+  loading:
+    trust_remote_code: false
+    use_fast_tokenizer: true
+    torch_dtype: "bfloat16"   # Torch dtype for model loading
+
+# GPU and Memory Configuration - MINIMAL FOR 72B
+gpu:
+  memory_utilization: 0.98    # Still high utilization, focus on sequence length
+  # Aggressive vLLM memory optimizations
+  max_model_len: 1024         # Very short sequence length to minimize KV cache
+  gpu_memory_utilization: 0.98 # Explicit vLLM setting
+  swap_space: 8               # More aggressive CPU offloading
+  block_size: 16              # Smaller block size for KV cache
+
+# Environment Configuration (for memory management)
+environment:
+  n_rollouts: 25              # Very small batch size
+
+# Evaluation-specific Settings
+evaluation:
+  disable_training_features: true
+  val_before_train: false
+  test_freq: -1
+  save_freq: -1
+  total_epochs: 1
+  log_val_generations: 2      # Minimal logging
+  logger: ["console", "wandb"]
+
+# Paths and Directories
+paths:
+  default_output_dir: "/scratch/jsbd1n24/evaluation_results"
+  default_wandb_project: "AAMAS_msrl_base"
+  base_config_path: "Verlog/verl/trainer/config/ppo_trainer.yaml"
