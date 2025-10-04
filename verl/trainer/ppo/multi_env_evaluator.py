@@ -20,8 +20,42 @@ across multiple, distinct environments as specified in the configuration.
 
 import numpy as np
 import time
+import gc
+import psutil
+import os
 from verl import DataProto
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+class VecEnvContextManager:
+    """Context manager to ensure proper cleanup of vectorized environments."""
+    
+    def __init__(self, env_name, task, config, render_mode=None):
+        self.env_name = env_name
+        self.task = task
+        self.config = config
+        self.render_mode = render_mode
+        self.val_env = None
+    
+    def __enter__(self):
+        self.val_env = make_vec_env(
+            self.env_name,
+            self.task,
+            self.config,
+            render_mode=self.render_mode
+        )
+        return self.val_env
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.val_env is not None:
+            try:
+                self.val_env.close()
+                print(f"[VecEnvContextManager] Successfully closed environment {self.env_name}")
+            except Exception as e:
+                print(f"[ERROR] VecEnvContextManager: Failed to close environment {self.env_name}: {e}")
+                import traceback
+                print(f"[ERROR] VecEnvContextManager: Close traceback: {traceback.format_exc()}")
+        return False  # Don't suppress exceptions
 
 
 def make_vec_env(env_name, task, config, render_mode=None):
@@ -112,6 +146,11 @@ class MultiEnvEvaluator:
         print(f"[MultiEnvEvaluator] Starting evaluation at global_step={global_step}")
         print(f"[MultiEnvEvaluator] Number of environments to evaluate: {len(self.eval_environments)}")
         
+        # Log initial memory usage
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        print(f"[MultiEnvEvaluator] Initial memory usage: {initial_memory:.1f} MB")
+        
         all_metrics = {}
         
         for env_idx, env_config in enumerate(self.eval_environments):
@@ -125,45 +164,54 @@ class MultiEnvEvaluator:
             # Create a temporary config for this environment
             temp_config = self._create_env_config(env_config)
             
-            # Create vectorized environment for this evaluation
+            # Create vectorized environment for this evaluation using context manager
             try:
-                val_env = make_vec_env(
+                with VecEnvContextManager(
                     env_config['env_name'],
                     temp_config.envs.task,
                     temp_config,
                     render_mode=None
-                )
+                ) as val_env:
+                    # Run evaluation for this environment
+                    env_metrics, episode_data = self._evaluate_single_env(val_env, env_config, env_name)
+                    
+                    # Record end time and calculate duration
+                    end_time = time.time()
+                    eval_time = end_time - start_time
+                    
+                    # Log episode generation if configured
+                    self._maybe_log_episode_generation(episode_data, env_name, global_step)
+                    
+                    # Add environment-specific prefix to metrics
+                    prefixed_metrics = {}
+                    for key, value in env_metrics.items():
+                        prefixed_key = f"eval_{env_name}/{key}"
+                        prefixed_metrics[prefixed_key] = value
+                    
+                    all_metrics.update(prefixed_metrics)
+                    print(f"[MultiEnvEvaluator] Added {len(prefixed_metrics)} metrics for {env_name}")
+                    print(f"[MultiEnvEvaluator] Sample metrics for {env_name}: {list(prefixed_metrics.keys())[:5]}")
+                    
+                    inference_time = env_metrics.get("inference_time_seconds", 0.0)
+                    print(f"Completed evaluation for {env_name} in {eval_time:.2f}s (inference: {inference_time:.2f}s)")
+                    
             except Exception as e:
-                print(f"[ERROR] MultiEnvEvaluator: Failed to create vectorized environment: {e}")
+                print(f"[ERROR] MultiEnvEvaluator: Failed to evaluate environment {env_name}: {e}")
                 import traceback
                 print(f"[ERROR] MultiEnvEvaluator: Traceback: {traceback.format_exc()}")
                 raise
             
-            # Run evaluation for this environment
-            env_metrics, episode_data = self._evaluate_single_env(val_env, env_config, env_name)
+            # Force garbage collection after each environment to free memory
+            gc.collect()
             
-            # Record end time and calculate duration
-            end_time = time.time()
-            eval_time = end_time - start_time
-            
-            # Log episode generation if configured
-            self._maybe_log_episode_generation(episode_data, env_name, global_step)
-            
-            # Add environment-specific prefix to metrics
-            prefixed_metrics = {}
-            for key, value in env_metrics.items():
-                prefixed_key = f"eval_{env_name}/{key}"
-                prefixed_metrics[prefixed_key] = value
-            
-            all_metrics.update(prefixed_metrics)
-            print(f"[MultiEnvEvaluator] Added {len(prefixed_metrics)} metrics for {env_name}")
-            print(f"[MultiEnvEvaluator] Sample metrics for {env_name}: {list(prefixed_metrics.keys())[:5]}")
-            
-            # Close the environment to free resources
-            val_env.close()
-            inference_time = env_metrics.get("inference_time_seconds", 0.0)
-            print(f"Completed evaluation for {env_name} in {eval_time:.2f}s (inference: {inference_time:.2f}s)")
-                
+            # Log memory usage after each environment
+            current_memory = process.memory_info().rss / 1024 / 1024  # MB
+            print(f"[MultiEnvEvaluator] Memory usage after {env_name}: {current_memory:.1f} MB (delta: {current_memory - initial_memory:+.1f} MB)")
+        
+        # Final memory cleanup and logging
+        gc.collect()
+        final_memory = process.memory_info().rss / 1024 / 1024  # MB
+        print(f"[MultiEnvEvaluator] Final memory usage: {final_memory:.1f} MB (total delta: {final_memory - initial_memory:+.1f} MB)")
         
         print(f"[MultiEnvEvaluator] Evaluation completed. Total metrics collected: {len(all_metrics)}")
         print(f"[MultiEnvEvaluator] All metric keys: {list(all_metrics.keys())}")
