@@ -159,14 +159,14 @@ class ActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         local_path = copy_to_local(model_path)
 
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
+        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect (Outdated? FSDP uses mixed precision with fp32 states)
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get('model_dtype', None)
         if torch_dtype is None:
-            torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
+            torch_dtype = torch.bfloat16  # Use bfloat16 for both actor and critic for flash attention 2 & memory efficiency
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
@@ -196,8 +196,9 @@ class ActorRolloutRefWorker(Worker):
             else:
                 actor_module_class = AutoModelForCausalLM
 
+            # Force bfloat16 to avoid FlashAttention warnings
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                              torch_dtype=torch_dtype,
+                                                              torch_dtype=torch.bfloat16,  # Force bfloat16
                                                               config=actor_model_config,
                                                               attn_implementation='flash_attention_2',
                                                               trust_remote_code=trust_remote_code)
@@ -212,7 +213,7 @@ class ActorRolloutRefWorker(Worker):
                 _apply_liger_kernel_to_instance(model=actor_module)
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
+            actor_module.to(torch_dtype)  # Force bfloat16
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
@@ -694,7 +695,8 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(f'Critic overriding config {override_config_kwargs}')
 
-        torch_dtype = self.config.model.fsdp_config.get('model_dtype', 'fp32')
+        # torch_dtype = self.config.model.fsdp_config.get('model_dtype', 'fp32')
+        torch_dtype = self.config.model.fsdp_config.get('model_dtype', 'bf16')
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         from transformers import AutoConfig, AutoModelForTokenClassification

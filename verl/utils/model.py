@@ -308,7 +308,7 @@ def load_megatron_model_weights(config,
             is_value_model = True
         else:
             model = AutoModelForCausalLM.from_pretrained(local_model_path,
-                                                         torch_dtype="auto",
+                                                         torch_dtype=torch.bfloat16,
                                                          device_map="auto",
                                                          low_cpu_mem_usage=True)
             state_dict = model.state_dict()
@@ -394,7 +394,7 @@ def load_megatron_gptmodel_weights(config,
     else:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-        model = AutoModelForCausalLM.from_pretrained(local_model_path)
+        model = AutoModelForCausalLM.from_pretrained(local_model_path, torch_dtype=torch.bfloat16)
         state_dict = model.state_dict()
 
     from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
