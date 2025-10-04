@@ -181,8 +181,37 @@ class VecEnv:
         return images
 
     def close(self):
+        # Send close command to all worker processes
         for remote in self.remotes:
-            remote.send(('close', None))
+            try:
+                remote.send(('close', None))
+            except Exception as e:
+                print(f"[WARNING] VecEnv.close: Failed to send close command to worker: {e}")
+        
+        # Wait for all processes to terminate and join them
+        for i, process in enumerate(self.processes):
+            try:
+                # Give each process up to 5 seconds to terminate gracefully
+                process.join(timeout=5.0)
+                if process.is_alive():
+                    print(f"[WARNING] VecEnv.close: Worker process {i} did not terminate gracefully, forcing termination")
+                    process.terminate()
+                    process.join(timeout=2.0)  # Give it 2 more seconds after terminate
+                    if process.is_alive():
+                        print(f"[ERROR] VecEnv.close: Worker process {i} still alive after terminate, killing it")
+                        process.kill()
+                        process.join()
+            except Exception as e:
+                print(f"[ERROR] VecEnv.close: Exception while joining worker process {i}: {e}")
+        
+        # Close all remote connections
+        for remote in self.remotes:
+            try:
+                remote.close()
+            except Exception as e:
+                print(f"[WARNING] VecEnv.close: Failed to close remote connection: {e}")
+        
+        print(f"[VecEnv] Successfully closed {len(self.processes)} worker processes")
  
 
     
