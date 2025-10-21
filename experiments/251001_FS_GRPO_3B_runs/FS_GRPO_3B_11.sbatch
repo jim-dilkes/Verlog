@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=FS_PPO_3B
+#SBATCH --job-name=FS_GRPO_3B_11
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=6
-#SBATCH --partition=quad_h200
-#SBATCH --time=23:59:59
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=swarm_h100
+#SBATCH --time=30:00:00
 #SBATCH --gpus-per-node=1
 
 # --- Setup ---
@@ -16,7 +16,10 @@ module load cuda/12.4.0
 module load gcc/13.2.0
 
 cd Verlog
-source activate verlog
+eval "$(conda shell.bash hook)"
+conda activate verlog_15
+run_number=11
+
 
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -45,8 +48,7 @@ micro_batch_size=8
 
 # --- Define experiment variables ---
 project_name=AAMAS_msrl
-experiment_name=FS_PPO_3B
-run_number=5
+experiment_name=FS_GRPO_3B
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
@@ -58,20 +60,19 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
   actor_rollout_ref.model.path=$model \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.5 \
-  critic.model.path=$model \
-  critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
-  critic.highlight_first=True \
-  critic.highlight_ratio=3.0 \
+  algorithm.adv_estimator=grpo \
   algorithm.step_gamma=0.99 \
   algorithm.step_lam=0.95 \
   algorithm.use_kl_in_reward=False \
   algorithm.kl_ctrl.kl_coef=0.0 \
   envs.n_rollouts=32 \
+  envs.group_initial_seed=random \
+  envs.group_rollout_size=16 \
   envs.duplication_mode=none \
   envs.freeze_completed_episodes=True \
   envs.env_name=fastsnake \
@@ -87,10 +88,8 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.fastsnake_kwargs.death_reward=-1 \
   trainer.project_name=$project_name \
   trainer.experiment_name=${experiment_name}_run${run_number} \
-  trainer.group=${experiment_name}_run${run_number} \
+  trainer.group=${experiment_name} \
   trainer.val_before_train=True \
-  trainer.critic_warmup=40 \
-  trainer.critic_warmup_step=5 \
   trainer.n_gpus_per_node=1 \
   trainer.nnodes=1 \
   trainer.save_freq=100 \
@@ -98,8 +97,6 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   trainer.render=False \
   trainer.total_epochs=600 \
   trainer.default_local_dir=/scratch/jsbd1n24/checkpoints/${project_name}/${experiment_name}_run${run_number} \
-  trainer.max_actor_ckpt_to_keep=1 \
-  trainer.max_critic_ckpt_to_keep=1 \
   evaluation=eval_1 2>&1 | tee verl_demo.log
 
 # --- Cleanup Ray Cluster ---

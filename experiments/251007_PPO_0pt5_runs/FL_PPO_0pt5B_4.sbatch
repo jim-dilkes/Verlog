@@ -1,19 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=FL_GRPO_3B
+#SBATCH --job-name=FL_PPO_0pt5B_4
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=150GB
+#SBATCH --mem=250GB
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=swarm_a100
-#SBATCH --time=48:00:00
+#SBATCH --partition=swarm_h100,swarm_a100,a100
+#SBATCH --time=29:59:59
 #SBATCH --gpus-per-node=1
 
 # --- Setup ---
 module load conda/python3
 module load cuda/12.4.0
 module load gcc/13.2.0
+
+run_number=4
+number_of_steps=600
+
 
 cd Verlog
 source activate verlog
@@ -39,9 +43,13 @@ export RAY_DEDUP_LOGS=0
 export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=0
 
 # --- Define model and batch size ---
-model=Qwen/Qwen2.5-3B-Instruct
+model=Qwen/Qwen2.5-0.5B-Instruct
 # model=/scratch/jsbd1n24/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct
 micro_batch_size=8
+
+# --- Define experiment variables ---
+project_name=AAMAS_msrl
+experiment_name=FL_PPO_0pt5B
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
@@ -58,14 +66,15 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.5 \
-  algorithm.adv_estimator=grpo \
+  critic.model.path=$model \
+  critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
+  critic.highlight_first=True \
+  critic.highlight_ratio=3.0 \
   algorithm.step_gamma=0.99 \
   algorithm.step_lam=0.95 \
   algorithm.use_kl_in_reward=False \
   algorithm.kl_ctrl.kl_coef=0.0 \
   envs.n_rollouts=32 \
-  envs.group_initial_seed=random \
-  envs.group_rollout_size=16 \
   envs.duplication_mode=none \
   envs.freeze_completed_episodes=True \
   envs.env_name=frozenlake \
@@ -79,16 +88,21 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.frozenlake_kwargs.print_visualization=true \
   envs.frozenlake_kwargs.print_coordinates=true \
   envs.frozenlake_kwargs.max_rounds=8 \
-  trainer.project_name=AAMAS_msrl \
-  trainer.experiment_name=FL_GRPO_3B \
-  trainer.group=FL_GRPO_3B \
+  trainer.project_name=$project_name \
+  trainer.experiment_name=${experiment_name}_run${run_number}_slurm${SLURM_JOB_ID} \
+  trainer.group=${experiment_name} \
   trainer.val_before_train=True \
+  trainer.critic_warmup=40 \
+  trainer.critic_warmup_step=5 \
   trainer.n_gpus_per_node=1 \
   trainer.nnodes=1 \
-  trainer.save_freq=100 \
+  trainer.save_freq=50 \
   trainer.test_freq=50 \
   trainer.render=False \
-  trainer.total_epochs=600 \
+  trainer.total_epochs=$number_of_steps \
+  trainer.default_local_dir=/scratch/jsbd1n24/checkpoints/${project_name}/${experiment_name}_run${run_number} \
+  trainer.max_actor_ckpt_to_keep=1 \
+  trainer.max_critic_ckpt_to_keep=1 \
   evaluation=eval_1 2>&1 | tee verl_demo.log
 
 # --- Cleanup Ray Cluster ---
