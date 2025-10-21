@@ -8,6 +8,7 @@ import pathlib
 output_dir = pathlib.Path(__file__).parent / "data"
 
 experiment_groups = [
+    "FS_PPO_14B",
     "FS_PPO_7B",
     "FS_PPO_3B",
     "FS_PPO_0pt5B",

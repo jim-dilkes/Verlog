@@ -9,6 +9,7 @@ legend_kwargs = {
 }
 # eval_colors_list = ['#949494', '#DE8F05', '#029E73', '#D55E00', '#0173B2', '#CA9161', '#FBAFE4']
 eval_colors_list = ['#FF69B4', '#DE8F05', '#029E73', '#D55E00', '#0173B2', '#CA9161', '#FBAFE4']
+# Colours names are: pink, orange, green, red, blue, brown, purple
 
 # Coloutblind codes
 # #0173B2	#DE8F05	#029E73	#D55E00	#CC78BC	#CA9161	#FBAFE4	#949494	#ECE133	#56B4E9
@@ -58,15 +59,15 @@ run_params_mapping = {
 }
 
 run_name_colors = {
-    'Frozen Lake GRPO 3B': '#949494',
-    'Frozen Lake PPO 3B': '#DE8F05',
-    'Frozen Lake PPO 0.5B': '#029E73',
-    'Frozen Lake GRPO 0.5B': '#D55E00',
-    'Snake GRPO 3B': '#0173B2',
-    'Snake PPO 3B': '#CA9161',
-    'Snake PPO 7B': '#000000',
-    'Snake PPO 0.5B': '#029E73',
-    'Snake GRPO 0.5B': '#FBAFE4', # New colour
+    'Frozen Lake GRPO 3B': '#949494', # grey
+    'Frozen Lake PPO 3B': '#CA9161', # brown
+    'Frozen Lake PPO 0.5B': '#029E73', # green
+    'Frozen Lake GRPO 0.5B': '#d62728', # red
+    'Snake GRPO 3B': '#0173B2', # blue
+    'Snake PPO 3B': '#DE8F05', # orange
+    'Snake PPO 7B': '#FBAFE4', # purple
+    'Snake PPO 0.5B': '#000000', # green
+    'Snake GRPO 0.5B': '#FBAFE4', # pink
 }
 
 # Dictionary mapping evaluation environment names to themselves for customization
