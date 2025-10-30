@@ -2,7 +2,7 @@
 #SBATCH --job-name=T1pt0_k5
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --mem=150GB
+#SBATCH --mem=250GB
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4

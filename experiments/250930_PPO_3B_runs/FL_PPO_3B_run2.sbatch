@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=FL_PPO_3B_run2
+#SBATCH --job-name=FL_PPO_3B_5
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
@@ -46,7 +46,7 @@ micro_batch_size=8
 # --- Define experiment variables ---
 project_name=AAMAS_msrl
 experiment_name=FL_PPO_3B
-run_number=2
+run_number=5
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
@@ -87,7 +87,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.frozenlake_kwargs.max_rounds=8 \
   trainer.project_name=$project_name \
   trainer.experiment_name=${experiment_name}_run${run_number} \
-  trainer.group=${experiment_name}_run${run_number} \
+  trainer.group=${experiment_name} \
   trainer.val_before_train=True \
   trainer.critic_warmup=40 \
   trainer.critic_warmup_step=5 \

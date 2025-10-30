@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=FL_PPO_3B
+#SBATCH --job-name=FL_PPO_3B_4
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
@@ -45,8 +45,8 @@ micro_batch_size=8
 
 # --- Define experiment variables ---
 project_name=AAMAS_msrl
-experiment_name=FS_PPO_3B
-run_number=5
+experiment_name=FL_PPO_3B
+run_number=4
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
@@ -58,7 +58,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
   actor_rollout_ref.model.path=$model \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
@@ -87,7 +87,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.frozenlake_kwargs.max_rounds=8 \
   trainer.project_name=$project_name \
   trainer.experiment_name=${experiment_name}_run${run_number} \
-  trainer.group=${experiment_name}_run${run_number} \
+  trainer.group=${experiment_name} \
   trainer.val_before_train=True \
   trainer.critic_warmup=40 \
   trainer.critic_warmup_step=5 \

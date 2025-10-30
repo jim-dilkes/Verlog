@@ -87,7 +87,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.fastsnake_kwargs.death_reward=-1 \
   trainer.project_name=$project_name \
   trainer.experiment_name=${experiment_name}_run${run_number} \
-  trainer.group=${experiment_name}_run${run_number} \
+  trainer.group=${experiment_name} \
   trainer.val_before_train=True \
   trainer.critic_warmup=40 \
   trainer.critic_warmup_step=5 \
