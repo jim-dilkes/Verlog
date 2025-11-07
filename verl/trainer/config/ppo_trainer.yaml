@@ -248,6 +248,7 @@ envs:
   instruction_prompt: null
   binary_reward: False
   freeze_completed_episodes: false  # Freeze environments when episodes complete to prevent cross-batch episode issues
+  vec_env_multiprocessing: fork # spawn or fork
   captioner:
     type: naive
     max_text_history: 1
