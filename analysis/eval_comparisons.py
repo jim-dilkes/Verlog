@@ -929,7 +929,7 @@ def create_bar_charts(use_score=True):
     posttrained_llm_data = []
     bespoke_rl_data = []
     base_llm_dir = os.path.join(data_dir, 'full_llm_evals')
-    base_llm_dir = os.path.join(data_dir, 'full_llm_evals/poison_redos')
+    # base_llm_dir = os.path.join(data_dir, 'full_llm_evals/poison_redos')
     
     # Load bespoke model data from specified directory
     bespoke_dir = os.path.join(base_llm_dir, 'snakebench_job_lr1em05_eps100000_g0p9_155795')
@@ -942,11 +942,12 @@ def create_bar_charts(use_score=True):
                 
                 # Process each environment in the results
                 for env_name, env_data in data.items():
-                    score_mean_calc = np.mean(env_data['scores'])
-                    score_std_calc = np.std(env_data['scores'])
+                    # Use pre-calculated values from JSON
+                    score_mean_calc = env_data['mean_score']
+                    score_std_calc = env_data['std_score']
                     score_95ci_calc = stats.t.interval(0.95, len(env_data['scores']) - 1, loc=score_mean_calc, scale=stats.sem(env_data['scores']))
-                    reward_mean_calc = np.mean(env_data['rewards'])
-                    reward_std_calc = np.std(env_data['rewards'])
+                    reward_mean_calc = env_data['mean_reward']
+                    reward_std_calc = env_data['std_reward']
                     reward_95ci_calc = stats.t.interval(0.95, len(env_data['rewards']) - 1, loc=reward_mean_calc, scale=stats.sem(env_data['rewards']))
                     
                     bespoke_rl_data.append({
@@ -994,11 +995,12 @@ def create_bar_charts(use_score=True):
                         # Process each environment in the results
                         for env_name, env_data in data.items():
 
-                            score_mean_calc = np.mean(env_data['scores'])
-                            score_std_calc = np.std(env_data['scores'])
+                            # Use pre-calculated values from JSON
+                            score_mean_calc = env_data['mean_score']
+                            score_std_calc = env_data['std_score']
                             score_95ci_calc = stats.t.interval(0.95, len(env_data['scores']) - 1, loc=score_mean_calc, scale=stats.sem(env_data['scores']))
-                            reward_mean_calc = np.mean(env_data['rewards'])
-                            reward_std_calc = np.std(env_data['rewards'])
+                            reward_mean_calc = env_data['mean_reward']
+                            reward_std_calc = env_data['std_reward']
                             reward_95ci_calc = stats.t.interval(0.95, len(env_data['rewards']) - 1, loc=reward_mean_calc, scale=stats.sem(env_data['rewards']))
                             
                             base_llm_data.append({
@@ -1038,11 +1040,12 @@ def create_bar_charts(use_score=True):
 
                         # Process each environment in the results
                         for env_name, env_data in data.items():
-                            score_mean_calc = np.mean(env_data['scores'])
-                            score_std_calc = np.std(env_data['scores'])
+                            # Use pre-calculated values from JSON
+                            score_mean_calc = env_data['mean_score']
+                            score_std_calc = env_data['std_score']
                             score_95ci_calc = stats.t.interval(0.95, len(env_data['scores']) - 1, loc=score_mean_calc, scale=stats.sem(env_data['scores']))
-                            reward_mean_calc = np.mean(env_data['rewards'])
-                            reward_std_calc = np.std(env_data['rewards'])
+                            reward_mean_calc = env_data['mean_reward']
+                            reward_std_calc = env_data['std_reward']
                             reward_95ci_calc = stats.t.interval(0.95, len(env_data['rewards']) - 1, loc=reward_mean_calc, scale=stats.sem(env_data['rewards']))
                             
                             posttrained_llm_data.append({
@@ -1206,20 +1209,20 @@ def create_bar_charts(use_score=True):
             })
 
         # Add bespoke model data (DQN) if available for this environment
-        if env_bespoke_data is not None:
-            for _, row in env_bespoke_data.iterrows():
-                all_models.append({
-                    'label': row['model_name'],
-                    'mean_score': row['mean_score'],
-                    'std_score': row['std_score'],
-                    '95ci_score': row['95ci_score'],
-                    'mean_reward': row['mean_reward'],
-                    'std_reward': row['std_reward'],
-                    '95ci_reward': row['95ci_reward'],
-                    'model_type': 'bespoke',
-                    'model_size': 'DQN',
-                    'sort_key': (999, 999, 999, 999, 'bespoke')  # Sort bespoke models last
-                })
+        # if env_bespoke_data is not None:
+        #     for _, row in env_bespoke_data.iterrows():
+        #         all_models.append({
+        #             'label': row['model_name'],
+        #             'mean_score': row['mean_score'],
+        #             'std_score': row['std_score'],
+        #             '95ci_score': row['95ci_score'],
+        #             'mean_reward': row['mean_reward'],
+        #             'std_reward': row['std_reward'],
+        #             '95ci_reward': row['95ci_reward'],
+        #             'model_type': 'bespoke',
+        #             'model_size': 'DQN',
+        #             'sort_key': (999, 999, 999, 999, 'bespoke')  # Sort bespoke models last
+        #         })
         
         # Add manual entry for FS GRPO 3B-256 for Snake-20Step environment
 
@@ -1277,7 +1280,7 @@ def create_bar_charts(use_score=True):
             continue
         
         # Create the plot
-        fig, ax = plt.subplots(figsize=(6, 5))  # Wide figure for many bars
+        fig, ax = plt.subplots(figsize=(5, 4))  # Wide figure for many bars
         
         labels = [model['label'] for model in all_models]
         scores = [model['mean_score'] for model in all_models]
@@ -1328,23 +1331,13 @@ def create_bar_charts(use_score=True):
             base_scores = [scores[i] for i in base_indices]
             base_rewards = [rewards[i] for i in base_indices]
             base_ci95_score = [(scores[i] - ci95_score[i][0], ci95_score[i][1] - scores[i]) for i in base_indices]
-            print("HERE")
-            print(rewards)
-            print(ci95_reward)
             base_ci95_reward = [(rewards[i] - ci95_reward[i][0],  ci95_reward[i][1] - rewards[i]) for i in base_indices]
             base_colors = [colors[i] for i in base_indices]
             base_hatches = [hatches[i] for i in base_indices]
-            print(np.array(base_ci95_score).transpose())
-            print(np.array(base_ci95_reward).transpose())
             ax.bar(base_x, base_scores if use_score else base_rewards, color=base_colors, hatch=base_hatches, alpha=0.7, width=0.45, yerr=np.array(base_ci95_score).transpose() if use_score else np.array(base_ci95_reward).transpose())
         
         # Plot post-trained models with error bars (no hatch)
         if posttrained_indices:
-            print(ci95_score)
-            for i in posttrained_indices:
-                print(i, ci95_score[i])
-                print(ci95_score[i][0], ci95_score[i][1])
-                print()
             posttrained_x = [x_pos[i] for i in posttrained_indices]
             posttrained_scores = [scores[i] for i in posttrained_indices]
             posttrained_rewards = [rewards[i] for i in posttrained_indices]
