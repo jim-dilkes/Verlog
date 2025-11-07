@@ -305,3 +305,8 @@ envs:
     print_axes: false
     pad_observation_to_shape: null
     max_rounds: 8
+  webshop_kwargs:
+    max_steps: 8
+    num_products: 100_000
+    limit_goals: -1
+    goals_seed: null

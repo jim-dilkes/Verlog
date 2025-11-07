@@ -20,3 +20,11 @@ torchdata
 transformers
 # vllm==0.6.3.post1
 wandb
+# webshop environment
+werkzeug==2.3.8
+beautifulsoup4==4.11.1
+cleantext==1.1.4
+rank-bm25==0.2.2
+pyserini==0.17.0
+faiss-cpu==1.10.0
+thefuzz==0.19.0
