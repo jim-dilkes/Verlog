@@ -24,7 +24,8 @@ If there is a desired object you want to interact with or pickup in front of you
 {action_strings}
 
 [Rules]
-- Your goal is to {mission}. 
+- Your goal is to: {mission}.
+- You cannot "go forward" if there is an object or wall in front of you.
 - You cannot see the entire map, you may need to explore to find relevant objects.
 """.strip()
 
