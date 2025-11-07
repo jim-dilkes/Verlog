@@ -226,13 +226,30 @@ class vLLMRollout(BaseRollout):
                 'n': 1  # if greedy, only 1 response
             }
         elif is_validate:
-            # TODO: try **
-            kwargs = {
-                'top_k': self.config.val_kwargs.top_k,
-                'top_p': self.config.val_kwargs.top_p,
-                'temperature': self.config.val_kwargs.temperature,
-                'n': 1,  # if validate, already repeat in ray_trainer
-            }
+            # Check meta_info first for per-request overrides, then fall back to val_kwargs
+            kwargs = {}
+            # Read from meta_info if present, otherwise use val_kwargs
+            if 'temperature' in prompts.meta_info:
+                kwargs['temperature'] = prompts.meta_info['temperature']
+            elif hasattr(self.config.val_kwargs, 'temperature'):
+                kwargs['temperature'] = self.config.val_kwargs.temperature
+            
+            if 'top_p' in prompts.meta_info:
+                kwargs['top_p'] = prompts.meta_info['top_p']
+            elif hasattr(self.config.val_kwargs, 'top_p'):
+                kwargs['top_p'] = self.config.val_kwargs.top_p
+            
+            if 'top_k' in prompts.meta_info:
+                kwargs['top_k'] = prompts.meta_info['top_k']
+            elif hasattr(self.config.val_kwargs, 'top_k'):
+                kwargs['top_k'] = self.config.val_kwargs.top_k
+            
+            if 'min_p' in prompts.meta_info:
+                kwargs['min_p'] = prompts.meta_info['min_p']
+            elif hasattr(self.config.val_kwargs, 'min_p'):
+                kwargs['min_p'] = self.config.val_kwargs.min_p
+            
+            kwargs['n'] = 1  # if validate, already repeat in ray_trainer
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):

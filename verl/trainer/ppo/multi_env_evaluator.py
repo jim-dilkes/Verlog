@@ -229,52 +229,118 @@ class MultiEnvEvaluator:
         Returns:
             OmegaConf object: Temporary config for the environment
         """
-        from omegaconf import OmegaConf
-        from copy import deepcopy
+        from omegaconf import OmegaConf, open_dict
         
         print(f"[MultiEnvEvaluator] Creating config for environment: {env_config.get('name', 'unknown')}")
         print(f"[MultiEnvEvaluator] Original env_config: {env_config}")
+        print(f"[MultiEnvEvaluator] Training config n_rollouts: {self.config.envs.n_rollouts}")
+        print(f"[MultiEnvEvaluator] Evaluation env_config n_rollouts: {env_config['n_rollouts']}")
         
-        # Start with a deep copy of the main config
-        temp_config = deepcopy(self.config)
+        # Create a proper copy using OmegaConf methods to avoid struct mode issues
+        # Convert to container, modify, then recreate OmegaConf object
+        temp_config = OmegaConf.create(OmegaConf.to_container(self.config, resolve=True))
         
-        # Override environment-specific settings
-        temp_config.envs.n_rollouts = env_config['n_rollouts']
-        temp_config.envs.episode_length = env_config['episode_length']
-        temp_config.envs.env_name = env_config['env_name']
-        temp_config.envs.task = env_config.get('task', None)  # Set the task from env_config
-        temp_config.envs.freeze_completed_episodes = env_config.get('freeze_completed_episodes', False)
-        temp_config.envs.duplication_mode = env_config.get('duplication_mode', 'none')
-        temp_config.envs.format_penalty = env_config.get('format_penalty', 0.0)
-        temp_config.envs.binary_reward = env_config.get('binary_reward', False)
-        
-        print(f"[MultiEnvEvaluator] After basic overrides - task: {temp_config.envs.task}, env_name: {temp_config.envs.env_name}")
-        
-        # Handle captioner configuration
-        if 'captioner' in env_config:
-            print(f"[MultiEnvEvaluator] Original captioner config: {self.config.envs.captioner}")
-            print(f"[MultiEnvEvaluator] Environment captioner config: {env_config['captioner']}")
+        # Use open_dict to allow modifications even if struct mode was enabled
+        with open_dict(temp_config):
+            # Override environment-specific settings
+            temp_config.envs.n_rollouts = env_config['n_rollouts']
+            temp_config.envs.episode_length = env_config['episode_length']
+            temp_config.envs.env_name = env_config['env_name']
+            temp_config.envs.task = env_config.get('task', None)  # Set the task from env_config
+            temp_config.envs.freeze_completed_episodes = env_config.get('freeze_completed_episodes', False)
+            temp_config.envs.duplication_mode = env_config.get('duplication_mode', 'none')
+            temp_config.envs.format_penalty = env_config.get('format_penalty', 0.0)
+            temp_config.envs.binary_reward = env_config.get('binary_reward', False)
             
-            # Merge captioner config with defaults to ensure all required fields are present
-            captioner_config = self.config.envs.captioner.copy()
-            captioner_config.update(env_config['captioner'])
-            temp_config.envs.captioner = captioner_config
+            print(f"[MultiEnvEvaluator] After basic overrides - n_rollouts: {temp_config.envs.n_rollouts}, task: {temp_config.envs.task}, env_name: {temp_config.envs.env_name}")
             
-            print(f"[MultiEnvEvaluator] Final captioner config: {temp_config.envs.captioner}")
+            # Handle captioner configuration
+            if 'captioner' in env_config:
+                print(f"[MultiEnvEvaluator] Original captioner config: {self.config.envs.captioner}")
+                print(f"[MultiEnvEvaluator] Environment captioner config: {env_config['captioner']}")
+                
+                # Merge captioner config with defaults to ensure all required fields are present
+                captioner_config = OmegaConf.to_container(self.config.envs.captioner)
+                captioner_config.update(env_config['captioner'])
+                temp_config.envs.captioner = captioner_config
+                
+                print(f"[MultiEnvEvaluator] Final captioner config: {temp_config.envs.captioner}")
+            
+            # Handle environment-specific kwargs
+            env_name = env_config['env_name']
+            if f'{env_name}_kwargs' in env_config:
+                print(f"[MultiEnvEvaluator] Setting {env_name}_kwargs: {env_config[f'{env_name}_kwargs']}")
+                temp_config.envs[f'{env_name}_kwargs'] = env_config[f'{env_name}_kwargs']
+            
+            # Set initial seed if specified
+            if 'initial_seed' in env_config:
+                temp_config.envs.group_initial_seed = env_config['initial_seed']
+                print(f"[MultiEnvEvaluator] Set initial_seed: {env_config['initial_seed']}")
         
-        # Handle environment-specific kwargs
-        env_name = env_config['env_name']
-        if f'{env_name}_kwargs' in env_config:
-            print(f"[MultiEnvEvaluator] Setting {env_name}_kwargs: {env_config[f'{env_name}_kwargs']}")
-            temp_config.envs[f'{env_name}_kwargs'] = env_config[f'{env_name}_kwargs']
-        
-        # Set initial seed if specified
-        if 'initial_seed' in env_config:
-            temp_config.envs.group_initial_seed = env_config['initial_seed']
-            print(f"[MultiEnvEvaluator] Set initial_seed: {env_config['initial_seed']}")
-        
+        print(f"[MultiEnvEvaluator] Final temp_config.envs.n_rollouts: {temp_config.envs.n_rollouts}")
         print(f"[MultiEnvEvaluator] Final temp_config.envs keys: {list(temp_config.envs.keys())}")
         return temp_config
+    
+    def _get_generation_config(self, env_config):
+        """
+        Get generation configuration for an environment.
+        
+        If generation parameters are specified in env_config, use those.
+        Otherwise, fall back to val_kwargs from the main config.
+        
+        Args:
+            env_config: Environment-specific configuration
+            
+        Returns:
+            dict: Generation parameters to set in meta_info
+        """
+        gen_config = {}
+        
+        # Check if generation config is specified in env_config
+        if 'generation' in env_config:
+            gen_config_from_env = env_config['generation']
+            print(f"[MultiEnvEvaluator] Using generation config from env_config: {gen_config_from_env}")
+            
+            # Map generation parameters to meta_info keys
+            # Note: vLLM supports min_p but not top_a
+            if 'temperature' in gen_config_from_env:
+                gen_config['temperature'] = gen_config_from_env['temperature']
+            if 'top_p' in gen_config_from_env:
+                gen_config['top_p'] = gen_config_from_env['top_p']
+            if 'top_k' in gen_config_from_env:
+                gen_config['top_k'] = gen_config_from_env['top_k']
+            if 'min_p' in gen_config_from_env:
+                gen_config['min_p'] = gen_config_from_env['min_p']
+            if 'do_sample' in gen_config_from_env:
+                gen_config['do_sample'] = gen_config_from_env['do_sample']
+            if 'n' in gen_config_from_env:
+                gen_config['n'] = gen_config_from_env['n']
+        else:
+            # Fall back to val_kwargs from main config
+            if hasattr(self.config, 'actor_rollout_ref') and hasattr(self.config.actor_rollout_ref, 'rollout'):
+                rollout_config = self.config.actor_rollout_ref.rollout
+                if hasattr(rollout_config, 'val_kwargs'):
+                    val_kwargs = rollout_config.val_kwargs
+                    print(f"[MultiEnvEvaluator] Using generation config from val_kwargs: {val_kwargs}")
+                    
+                    if hasattr(val_kwargs, 'temperature'):
+                        gen_config['temperature'] = val_kwargs.temperature
+                    if hasattr(val_kwargs, 'top_p'):
+                        gen_config['top_p'] = val_kwargs.top_p
+                    if hasattr(val_kwargs, 'top_k'):
+                        gen_config['top_k'] = val_kwargs.top_k
+                    if hasattr(val_kwargs, 'min_p'):
+                        gen_config['min_p'] = val_kwargs.min_p
+                    if hasattr(val_kwargs, 'do_sample'):
+                        gen_config['do_sample'] = val_kwargs.do_sample
+                    if hasattr(val_kwargs, 'n'):
+                        gen_config['n'] = val_kwargs.n
+        
+        # Always set validate flag
+        gen_config['validate'] = True
+        
+        print(f"[MultiEnvEvaluator] Final generation config: {gen_config}")
+        return gen_config
     
     def _maybe_log_episode_generation(self, episode_data, env_name, global_step):
         """
@@ -365,6 +431,8 @@ class MultiEnvEvaluator:
         episode_total_score = 0.0
         episode_tracked = False
 
+        # Get generation config for this environment (once per environment)
+        self._current_gen_config = self._get_generation_config(env_config)
 
         for j in range(env_config['episode_length']):
         
@@ -397,8 +465,11 @@ class MultiEnvEvaluator:
             }
             val_gen_batch = DataProto.from_dict(tensors=val_obs_data)
             val_gen_batch.meta_info["step"] = None
-            # val_gen_batch.meta_info["do_sample"] = False
-            val_gen_batch.meta_info["is_validate"] = True
+            
+            # Apply generation config to meta_info (temperature, top_p, etc.)
+            # This was set once at the start of the evaluation for this environment
+            for key, value in self._current_gen_config.items():
+                val_gen_batch.meta_info[key] = value
             
             # Generate actions using the shared policy (measure inference time)
             inference_start = time.time()
