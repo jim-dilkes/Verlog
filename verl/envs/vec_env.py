@@ -2,9 +2,11 @@
 # Original author: yuchao
 
 import numpy as np
+import os
 import torch
-from multiprocessing import Process, Pipe
+import multiprocessing
 import random
+import psutil
 
 from collections import defaultdict
 
@@ -15,6 +17,13 @@ def merge_metrics(infos):
             merged_infos[key].append(value)
     merged_infos = {key: np.mean(values) for key, values in merged_infos.items()}
     return merged_infos
+
+
+def get_process_memory_mb():
+    """Get current process memory usage in MB"""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    return mem_info.rss / 1024 / 1024  # Convert bytes to MB
 
 
 class CloudpickleWrapper(object):
@@ -41,10 +50,19 @@ class VecEnv:
         self.n_rollouts = config.envs.n_rollouts
         assert len(env_fns) == self.n_rollouts, "Number of env_fns must match n_rollouts"
         
-        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.n_rollouts)])
+        # Get multiprocessing method from config, default to 'spawn' for safety
+        # 'spawn' avoids CUDA segfaults when forking (fork copies parent's CUDA state)
+        mp_method = config.envs.get('vec_env_multiprocessing', 'spawn')
+        if mp_method not in ['fork', 'spawn', 'forkserver']:
+            raise ValueError(f"Invalid vec_env_multiprocessing method: {mp_method}. Must be one of: fork, spawn, forkserver")
+        
+        self.mp_context = multiprocessing.get_context(mp_method)
+        print(f"[VecEnv] Using multiprocessing method: {mp_method}")
+        
+        self.remotes, self.work_remotes = zip(*[self.mp_context.Pipe() for _ in range(self.n_rollouts)])
         self.processes = []
         for rank, (work_remote, remote, env_fn, captioner_fn) in enumerate(zip(self.work_remotes, self.remotes, env_fns, captioner_fns)):
-            p = Process(
+            p = self.mp_context.Process(
                 target=worker,
                 args=(rank, work_remote, remote, env_name, CloudpickleWrapper(env_fn), CloudpickleWrapper(captioner_fn)),
             )
@@ -179,6 +197,30 @@ class VecEnv:
             remote.send(('render', None))
         images = [remote.recv() for remote in self.remotes]
         return images
+    
+    def get_worker_memory_stats(self):
+        """Get memory usage statistics from all workers"""
+        for remote in self.remotes:
+            remote.send(('get_memory', None))
+        
+        memory_stats = [remote.recv() for remote in self.remotes]
+        
+        # Calculate statistics
+        total_memory = sum(stat['memory_mb'] for stat in memory_stats)
+        avg_memory = total_memory / len(memory_stats)
+        max_memory = max(stat['memory_mb'] for stat in memory_stats)
+        min_memory = min(stat['memory_mb'] for stat in memory_stats)
+        
+        print(f"\n{'='*60}")
+        print(f"Worker Memory Statistics ({len(memory_stats)} workers)")
+        print(f"{'='*60}")
+        print(f"Total:   {total_memory:.2f} MB ({total_memory/1024:.2f} GB)")
+        print(f"Average: {avg_memory:.2f} MB per worker")
+        print(f"Max:     {max_memory:.2f} MB (worker {memory_stats[np.argmax([s['memory_mb'] for s in memory_stats])]['rank']})")
+        print(f"Min:     {min_memory:.2f} MB (worker {memory_stats[np.argmin([s['memory_mb'] for s in memory_stats])]['rank']})")
+        print(f"{'='*60}\n")
+        
+        return memory_stats
 
     def close(self):
         # Send close command to all worker processes
@@ -216,24 +258,34 @@ class VecEnv:
 
     
 def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper):
-    
     random.seed(rank)
     np.random.seed(rank)
     
     parent_remote.close()
+    
+    # Memory tracking
+    mem_start = get_process_memory_mb()
+    print(f"[Worker {rank}] Memory at start: {mem_start:.2f} MB")
+    
     try:
         env = env_fn_wrapper.x()
+        mem_after_env = get_process_memory_mb()
+        print(f"[Worker {rank}] Memory after env creation: {mem_after_env:.2f} MB (delta: +{mem_after_env - mem_start:.2f} MB)")
     except Exception as e:
         print(f"[ERROR] Worker {rank}: Failed to create environment: {e}")
         raise
     
     try:
         captioner = captioner_fn_wrapper.x()
+        mem_after_captioner = get_process_memory_mb()
+        print(f"[Worker {rank}] Memory after captioner creation: {mem_after_captioner:.2f} MB (delta: +{mem_after_captioner - mem_after_env:.2f} MB)")
+        print(f"[Worker {rank}] Total memory used: {mem_after_captioner:.2f} MB")
     except Exception as e:
         print(f"[ERROR] Worker {rank}: Failed to create captioner: {e}")
         raise
     
     image = None
+    reset_count = 0
     
     def env_step(action):
         try:
@@ -255,12 +307,20 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
             raise
 
     def env_reset(seed=None):
+        nonlocal reset_count
         captioner.reset()
         env_obs, info = env.reset(seed=seed)
         image = env_obs.get("image", None)
         instructions = env_obs["mission"]  if env_name == "babyai" else None
         inst_prompt = env.get_instruction_prompt(instructions=instructions)
         captioner.prompt_builder.update_instruction_prompt(inst_prompt)
+        
+        # Log memory on first reset
+        reset_count += 1
+        if reset_count == 1:
+            mem_after_reset = get_process_memory_mb()
+            print(f"[Worker {rank}] Memory after first reset: {mem_after_reset:.2f} MB")
+        
         return captioner.get_obs(env_obs), info, image
         
     while True:
@@ -280,6 +340,10 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
                 
             elif cmd == 'render':
                 remote.send(image)
+                
+            elif cmd == 'get_memory':
+                mem_current = get_process_memory_mb()
+                remote.send({'rank': rank, 'memory_mb': mem_current})
                 
             elif cmd == 'close':
                 env.close()

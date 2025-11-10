@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=WS_3B_16step_1
+#SBATCH --job-name=WS_3B_16step_Hpt01_1
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=400GB
@@ -93,6 +93,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.binary_reward=False \
   envs.captioner.type=naive \
   envs.captioner.max_text_history=0 \
+  envs.vec_env_multiprocessing=spawn \
   trainer.project_name=$project_name \
   trainer.experiment_name=${experiment_name}_run${run_number}_slurm${SLURM_JOB_ID} \
   trainer.group=${experiment_name} \
