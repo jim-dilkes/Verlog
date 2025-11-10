@@ -320,13 +320,9 @@ class DataParallelPPOActor(BasePPOActor):
                             self.config
                         )
 
-                    if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
+                    entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                    # compute policy loss
+                    policy_loss = pg_loss - entropy_loss * entropy_coeff
 
                     if self.config.use_kl_loss:
                         ref_log_prob = data['ref_log_prob']
