@@ -96,6 +96,10 @@ class ActorRolloutRefWorker(Worker):
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
+        # LoRA detection
+        self._lora_rank = self.config.model.get("lora_rank", 0)
+        self._is_lora = self.config.model.get("lora_adapter_path") is not None or self._lora_rank > 0
+
         self.role = role
         assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref']
 
@@ -217,6 +221,36 @@ class ActorRolloutRefWorker(Worker):
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+
+            # Apply LoRA if configured
+            if self._is_lora:
+                print("Applying LoRA to actor module")
+                actor_module.enable_input_require_grads()
+
+                lora_adapter_path = self.config.model.get("lora_adapter_path")
+                if lora_adapter_path is not None:
+                    from peft import PeftModel, TaskType
+                    print(f"Loading pre-trained LoRA adapter to {role} from: {lora_adapter_path}")
+                    local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
+                    actor_module = PeftModel.from_pretrained(actor_module, local_adapter_path, is_trainable=True)
+                    peft_config = actor_module.peft_config["default"]
+                    # Ensure task_type is TaskType enum, not string
+                    if isinstance(peft_config.task_type, str):
+                        peft_config.task_type = TaskType.CAUSAL_LM
+                else:
+                    from peft import LoraConfig, TaskType, get_peft_model
+                    from verl.utils.py_functional import convert_to_regular_types
+                    # Convert config to regular Python types before creating PEFT model
+                    lora_config = {
+                        "task_type": TaskType.CAUSAL_LM,
+                        "r": self.config.model.lora_rank,
+                        "lora_alpha": self.config.model.lora_alpha,
+                        "target_modules": convert_to_regular_types(self.config.model.target_modules),
+                        "exclude_modules": convert_to_regular_types(self.config.model.get("exclude_modules", [])),
+                        "bias": "none",
+                    }
+                    actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -237,7 +271,11 @@ class ActorRolloutRefWorker(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=actor_module, 
+            config=fsdp_config.get('wrap_policy', None),
+            is_lora=self._is_lora
+        )
 
         if self._is_rollout and self.config.rollout.name == 'hf':
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
@@ -537,6 +575,13 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
+        from contextlib import nullcontext
+        
+        # when is_lora is True, we use the actor without lora applied to calculate the log_prob
+        # which is mostly used for ref log_prob calculation
+        is_lora = data.meta_info.pop("is_lora", False)
+        adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+        
         data = data.to(torch.cuda.current_device())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size_per_gpu
@@ -546,7 +591,8 @@ class ActorRolloutRefWorker(Worker):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.actor.compute_log_prob(data=data)
+            with adapter_ctx:
+                output = self.actor.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'old_log_probs': output},
                                          meta_info={'temperature': self.config.rollout.temperature})
             output = self.ulysses_sharding_manager.postprocess_data(output)
@@ -566,7 +612,16 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
+        if self._is_lora:
+            # if _is_lora, actor without lora applied is the ref
+            data.meta_info["is_lora"] = True
+            data = self.compute_log_prob(data)
+            # this old_log_probs is in fact ref_log_prob
+            data = DataProto.from_dict(tensors={"ref_log_prob": data.batch["old_log_probs"]})
+            return data
+        
         assert self._is_ref
+        # else: otherwise, the class have a standalone ref model
 
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
@@ -596,6 +651,13 @@ class ActorRolloutRefWorker(Worker):
         # only support save and load ckpt for actor
         assert self._is_actor
         import torch
+        import torch.distributed as dist
+        import json
+        import os
+        from dataclasses import asdict
+        from safetensors.torch import save_file
+        from verl.utils.fsdp_utils import fsdp_version, layered_summon_lora_params
+        
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -603,6 +665,35 @@ class ActorRolloutRefWorker(Worker):
                                                 hdfs_path=hdfs_path,
                                                 global_step=global_step,
                                                 max_ckpt_to_keep=max_ckpt_to_keep)
+
+        # Save LoRA adapter separately if using LoRA
+        if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
+            lora_save_path = os.path.join(local_path, "lora_adapter")
+            peft_model = getattr(self, "actor_module", self.actor_module_fsdp)
+            peft_config = {}
+            
+            if dist.get_rank() == 0:
+                os.makedirs(lora_save_path, exist_ok=True)
+                peft_config = asdict(peft_model.peft_config.get("default", {}))
+                peft_config["task_type"] = peft_config["task_type"].value
+                peft_config["peft_type"] = peft_config["peft_type"].value
+                peft_config["target_modules"] = list(peft_config["target_modules"])
+            
+            try:
+                if fsdp_version(self.actor_module_fsdp) > 0:
+                    self.actor_module_fsdp = self.actor_module_fsdp.to(torch.cuda.current_device())
+                    lora_params = layered_summon_lora_params(self.actor_module_fsdp)
+                    if dist.get_rank() == 0:
+                        save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
+                        with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                            json.dump(peft_config, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                if dist.get_rank() == 0:
+                    logger.warning(f"Save LoRA Adapter Error ({e})")
+            
+            dist.barrier()
+            if dist.get_rank() == 0:
+                logger.info(f"Saved LoRA adapter to: {lora_save_path}")
 
         torch.distributed.barrier()
         if self._is_offload_param:

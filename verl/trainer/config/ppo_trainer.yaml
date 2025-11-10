@@ -33,6 +33,11 @@ actor_rollout_ref:
     enable_gradient_checkpointing: True
     use_remove_padding: False
     use_liger: False
+    lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
+    lora_alpha: 16  # LoRA scaling factor
+    target_modules: all-linear  # or specific list like ["q_proj", "v_proj", "o_proj"]
+    exclude_modules: []  # Optional: modules to exclude
+    lora_adapter_path: null  # Optional: path to pre-trained adapter
   actor:
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 256
