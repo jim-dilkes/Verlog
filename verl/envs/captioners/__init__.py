@@ -11,10 +11,15 @@ def make_captioner(config):
     """
     prompt_builder = create_prompt_builder(config.envs.captioner)
     env_name = config.envs.env_name
+    
+    # Get prompt config if available (may be None if not specified)
+    naive_instruction = None
+    if hasattr(config, 'prompt') and hasattr(config.prompt, 'prompt'):
+        naive_instruction = getattr(config.prompt.prompt, 'naive_instruction', None)
 
     if config.envs.captioner.type == "naive":
         from .naive import NaiveCaptioner
-        return NaiveCaptioner(prompt_builder, env_name)
+        return NaiveCaptioner(prompt_builder, env_name, naive_instruction=naive_instruction)
     elif config.envs.captioner.type == "cot":
         from .cot import COTCaptioner
         return COTCaptioner(prompt_builder, env_name)

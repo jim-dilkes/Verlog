@@ -1,6 +1,7 @@
 defaults:
   - _self_
   - evaluation: default
+  - prompt: default
 
 data:
   tokenizer: null

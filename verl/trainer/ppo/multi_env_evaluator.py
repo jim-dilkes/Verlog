@@ -252,6 +252,11 @@ class MultiEnvEvaluator:
             temp_config.envs.format_penalty = env_config.get('format_penalty', 0.0)
             temp_config.envs.binary_reward = env_config.get('binary_reward', False)
             
+            # Handle instruction_prompt from evaluation config
+            if 'instruction_prompt' in env_config:
+                temp_config.envs.instruction_prompt = env_config['instruction_prompt']
+                print(f"[MultiEnvEvaluator] Set instruction_prompt from eval config (length: {len(env_config['instruction_prompt']) if env_config['instruction_prompt'] else 0} chars)")
+            
             print(f"[MultiEnvEvaluator] After basic overrides - n_rollouts: {temp_config.envs.n_rollouts}, task: {temp_config.envs.task}, env_name: {temp_config.envs.env_name}")
             
             # Handle captioner configuration
