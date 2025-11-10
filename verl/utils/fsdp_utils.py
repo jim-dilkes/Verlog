@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Dict
+from collections import OrderedDict
 import functools
 import json
 import math
@@ -340,3 +341,56 @@ def parallel_init_module_fn(module: torch.nn.Module, shard_states: Dict[str, tor
         return sub_mod
 
     return init_fn
+
+
+def fsdp_version(module):
+    """Get FSDP version from module. Returns 0 if not FSDP, >0 if FSDP."""
+    if isinstance(module, FSDP):
+        return 1  # FSDP1
+    # Check for FSDP2
+    if hasattr(module, '_fsdp_wrapped_module'):
+        return 1  # FSDP1
+    return 0
+
+
+def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+    """
+    Collect LoRA parameters from FSDP-wrapped model using layered summoning.
+    This is more memory-efficient than summoning all parameters at once.
+    """
+    from peft.utils.save_and_load import get_peft_model_state_dict
+
+    def __prefix_submodules(module, prefix):
+        for name, submodule in module.named_modules():
+            if name.startswith(prefix) and "." not in name[len(prefix):]:
+                yield name, submodule
+
+    lora_params = OrderedDict()
+    prefix_list = [
+        '_fsdp_wrapped_module.base_model.model.',
+        '_fsdp_wrapped_module.base_model.model.model.',
+        '_fsdp_wrapped_module.base_model.model.model.layers.'
+    ]
+    
+    for prefix in prefix_list:
+        for name, submodule in __prefix_submodules(fsdp_module, prefix):
+            prefix_clean = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
+            if name.endswith('.model') or name.endswith('.layers'):
+                continue
+            if fsdp_version(submodule) > 0:
+                with FSDP.summon_full_params(submodule, writeback=False):
+                    sub_lora_params = get_peft_model_state_dict(
+                        fsdp_module._fsdp_wrapped_module, 
+                        state_dict=submodule.state_dict()
+                    )
+                    sub_lora_params = {
+                        f"{prefix_clean}.{param_name}": param.full_tensor().detach().cpu() 
+                        if hasattr(param, 'full_tensor') 
+                        else param.detach().cpu()
+                        for param_name, param in sub_lora_params.items()
+                    }
+                    lora_params.update(sub_lora_params)
+                    submodule._is_root = False
+                torch.cuda.empty_cache()
+    
+    return lora_params

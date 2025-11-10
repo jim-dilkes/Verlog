@@ -292,6 +292,8 @@ class RayPPOTrainer(object):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        # if ref_in_actor is True, the reference policy will be actor without lora applied
+        self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
@@ -782,7 +784,7 @@ class RayPPOTrainer(object):
             self.critic_wg = all_wg['critic']
             self.critic_wg.init_model()
 
-        if self.use_reference_policy:
+        if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
 
@@ -1261,7 +1263,7 @@ class RayPPOTrainer(object):
                             gen_batch_output.batch["reward"] = torch.tensor(reward, dtype=torch.float64)
                             gen_batch_output.batch["frozen_mask"] = torch.zeros(self.config.envs.n_rollouts, dtype=torch.int64)
 
-                            if self.config.envs.group_rollout_size is not None and dtype(self.config.envs.group_rollout_size) == int:
+                            if self.config.envs.group_rollout_size is not None and type(self.config.envs.group_rollout_size) == int:
                                 gen_batch_output.batch["uid"] = np.array([i // self.config.envs.group_rollout_size for i in range(self.config.envs.n_rollouts)])
                             
                             batch.insert(
@@ -1326,7 +1328,10 @@ class RayPPOTrainer(object):
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with _timer('ref', timing_raw):
-                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                        if not self.ref_in_actor:
+                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                        else:
+                            ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                         batch = batch.union(ref_log_prob)
 
                 # compute values

@@ -161,7 +161,7 @@ class ActorRolloutRefWorker(Worker):
         assert role in ['actor', 'ref']
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
-        local_path = copy_to_local(model_path)
+        local_path = model_path
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect (Outdated? FSDP uses mixed precision with fp32 states)
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
@@ -231,7 +231,7 @@ class ActorRolloutRefWorker(Worker):
                 if lora_adapter_path is not None:
                     from peft import PeftModel, TaskType
                     print(f"Loading pre-trained LoRA adapter to {role} from: {lora_adapter_path}")
-                    local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
+                    local_adapter_path = copy_to_local(lora_adapter_path)
                     actor_module = PeftModel.from_pretrained(actor_module, local_adapter_path, is_trainable=True)
                     peft_config = actor_module.peft_config["default"]
                     # Ensure task_type is TaskType enum, not string
@@ -359,28 +359,35 @@ class ActorRolloutRefWorker(Worker):
             from verl.workers.sharding_manager import FSDPVLLMShardingManager
             log_gpu_memory_usage(f'Before building {rollout_name} rollout', logger=None)
             local_path = copy_to_local(self.config.model.path)
+            lora_kwargs = {'lora_kwargs': {"enable_lora": True, "max_loras": 1, "max_lora_rank": self._lora_rank}} if self._is_lora else {}
             if vllm_mode == 'customized':
                 rollout = vLLMRollout(actor_module=self.actor_module_fsdp,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
-                                      model_hf_config=self.actor_model_config)
+                                      model_hf_config=self.actor_model_config,
+                                      **lora_kwargs)
             elif vllm_mode == 'spmd':
                 rollout = vLLMRollout(model_path=local_path,
                                       config=self.config.rollout,
                                       tokenizer=self.tokenizer,
                                       model_hf_config=self.actor_model_config,
                                       device_mesh=rollout_device_mesh,
-                                      trust_remote_code=trust_remote_code)
+                                      trust_remote_code=trust_remote_code,
+                                      **lora_kwargs)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
             log_gpu_memory_usage(f'After building {rollout_name} rollout', logger=None)
-            if torch.distributed.get_world_size() == 1:
-                self.config.rollout.load_format = 'dummy_hf'
-            rollout_sharding_manager = FSDPVLLMShardingManager(module=self.actor_module_fsdp,
-                                                               inference_engine=rollout.inference_engine,
-                                                               model_config=self.actor_model_config,
-                                                               full_params='hf' in self.config.rollout.load_format,
-                                                               device_mesh=rollout_device_mesh)
+            full_params = torch.distributed.get_world_size() == 1
+            rollout_sharding_manager = FSDPVLLMShardingManager(
+                module=self.actor_module_fsdp,
+                inference_engine=rollout.inference_engine,
+                model_config=self.actor_model_config,
+                full_params=full_params,
+                device_mesh=rollout_device_mesh,
+                offload_param=self._is_offload_param,
+                load_format=self.config.rollout.load_format,
+                layered_summon=self.config.rollout.get('layered_summon', False),
+            )
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         elif rollout_name == 'sglang':
@@ -428,8 +435,10 @@ class ActorRolloutRefWorker(Worker):
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
+
+            local_path = copy_to_local(self.config.model.path)
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=local_path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
@@ -459,7 +468,8 @@ class ActorRolloutRefWorker(Worker):
                 trust_remote_code=self.config.model.get('trust_remote_code', False))
 
         if self._is_ref:
-            self.ref_module_fsdp = self._build_model_optimizer(model_path=self.config.model.path,
+            local_path = copy_to_local(self.config.model.path)
+            self.ref_module_fsdp = self._build_model_optimizer(model_path=local_path,
                                                                fsdp_config=self.config.ref.fsdp_config,
                                                                optim_config=None,
                                                                override_model_config=override_model_config,
@@ -592,8 +602,8 @@ class ActorRolloutRefWorker(Worker):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output = self.actor.compute_log_prob(data=data)
-            output = DataProto.from_dict(tensors={'old_log_probs': output},
+                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            output = DataProto.from_dict(tensors={'old_log_probs': output, 'entropys': entropys},
                                          meta_info={'temperature': self.config.rollout.temperature})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 

@@ -174,7 +174,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
-    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -188,15 +188,16 @@ class DataParallelPPOActor(BasePPOActor):
                 ``position_ids``: tensor of shape [batch_size, sequence_length]. torch.int64.
 
                 ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
+            calculate_entropy (bool): If True, also return entropy values
 
         Returns:
-            torch.Tensor: the log_prob tensor
+            torch.Tensor or tuple: the log_prob tensor, or (log_prob, entropy) if calculate_entropy=True
         """
         # set to eval
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info['micro_batch_size']
-        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
+        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
@@ -215,21 +216,32 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batches = batch.split(micro_batch_size)
 
         log_probs_lst = []
+        entropy_lst = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
 
             with torch.no_grad():
-                _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
+                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
             log_probs_lst.append(log_probs)
+            if calculate_entropy:
+                entropy_lst.append(entropy)
+
         log_probs = torch.concat(log_probs_lst, dim=0)
+        entropys = None
+        if calculate_entropy:
+            entropys = torch.concat(entropy_lst, dim=0)
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if calculate_entropy and entropys is not None:
+                entropys = entropys[revert_indices]
 
+        if calculate_entropy:
+            return log_probs, entropys
         return log_probs
 
     def update_policy(self, data: DataProto):
