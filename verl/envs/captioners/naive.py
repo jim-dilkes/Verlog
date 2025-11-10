@@ -4,7 +4,7 @@ import re
 from verl.envs.captioners.base import BaseCaptioner
 
 
-class NaiveCaptioner(BaseCaptioner):
+class NaiveCaptioner(BaseCaptioner): 
     """A captioner that generates actions based on observations without complex reasoning."""
 
     def __init__(self, prompt_builder, env_name=None, naive_instruction=None):
