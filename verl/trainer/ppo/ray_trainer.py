@@ -1386,10 +1386,16 @@ class RayPPOTrainer(object):
 
                 # update critic
                 if self.use_critic:
+                    # Add flag to indicate if we're in critic warmup phase
+                    is_critic_warmup = self.global_steps <= self.critic_warmup_step
+                    batch4train.meta_info['is_critic_warmup'] = is_critic_warmup
                     with _timer('update_critic', timing_raw):
                         critic_output = self.critic_wg.update_critic(batch4train)
                     critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                     metrics.update(critic_output_metrics)
+                    # Clear the warmup flag after use to avoid memory issues
+                    if 'is_critic_warmup' in batch4train.meta_info:
+                        del batch4train.meta_info['is_critic_warmup']
                 # implement critic warmup
                 if self.critic_warmup_step <= self.global_steps:
                     # update actor
