@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=FS_PPO_7B_Hpt01_2
+#SBATCH --job-name=FS_PPO_3B_21
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=6
-#SBATCH --partition=dual_h200,quad_h200
+#SBATCH --partition=swarm_h100,swarm_a100,a100
 #SBATCH --time=35:59:59
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=2
 
 # --- Define experiment variables ---
 project_name=AAMAS_msrl
-experiment_name=FS_PPO_7B_Hpt01
-run_number=2
-number_of_gpus=1
+experiment_name=FS_PPO_3B
+run_number=21
+number_of_gpus=2
 
 # --- Setup ---
 module load conda/python3
@@ -46,9 +46,9 @@ export RAY_DEDUP_LOGS=0
 export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=0
 
 # --- Define model and batch size ---
-model=Qwen/Qwen2.5-7B-Instruct
+model=Qwen/Qwen2.5-3B-Instruct
 # model=/scratch/jsbd1n24/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct
-micro_batch_size=8
+micro_batch_size=16
 
 
 # --- Run your main application ---
@@ -66,7 +66,6 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.5 \
-  actor_rollout_ref.actor.entropy_coeff=0.01 \
   critic.model.path=$model \
   critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
   critic.highlight_first=True \
@@ -100,7 +99,7 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   trainer.save_freq=50 \
   trainer.test_freq=50 \
   trainer.render=False \
-  trainer.total_epochs=600 \
+  trainer.total_epochs=1000 \
   trainer.default_local_dir=/scratch/jsbd1n24/checkpoints/${project_name}/${experiment_name}_run${run_number} \
   trainer.max_actor_ckpt_to_keep=1 \
   trainer.max_critic_ckpt_to_keep=1 \

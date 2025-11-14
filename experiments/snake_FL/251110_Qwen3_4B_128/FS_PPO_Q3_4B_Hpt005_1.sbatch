@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=FS_PPO_7B_Hpt01_1
+#SBATCH --job-name=FS_PPO_Q34B_128_Hpt005_1
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=6
-#SBATCH --partition=dual_h200,quad_h200
-#SBATCH --time=35:59:59
-#SBATCH --gpus-per-node=1
+#SBATCH --partition=swarm_h100,swarm_a100,a100
+#SBATCH --time=48:00:00
+#SBATCH --gpus-per-node=2
 
 # --- Define experiment variables ---
 project_name=AAMAS_msrl
-experiment_name=FS_PPO_7B_Hpt01
+experiment_name=FS_PPO_Q3_4B_128tok_Hpt005
 run_number=1
-number_of_gpus=1
+number_of_gpus=2
 
 # --- Setup ---
 module load conda/python3
@@ -46,15 +46,14 @@ export RAY_DEDUP_LOGS=0
 export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=0
 
 # --- Define model and batch size ---
-model=Qwen/Qwen2.5-7B-Instruct
+model=Qwen/Qwen3-4B-Instruct-2507
 # model=/scratch/jsbd1n24/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct
-micro_batch_size=8
-
+micro_batch_size=16
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   data.max_prompt_length=1500 \
-  data.max_response_length=256 \
+  data.max_response_length=128 \
   data.train_batch_size=256 \
   actor_rollout_ref.actor.ppo_mini_batch_size=128 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
@@ -66,7 +65,8 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.5 \
-  actor_rollout_ref.actor.entropy_coeff=0.01 \
+  actor_rollout_ref.actor.entropy_coeff=0.002 \
+  actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
   critic.model.path=$model \
   critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
   critic.highlight_first=True \
@@ -90,21 +90,23 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.fastsnake_kwargs.num_random_snakes=1 \
   envs.fastsnake_kwargs.death_reward=-1 \
   trainer.project_name=$project_name \
-  trainer.experiment_name=${experiment_name}_run${run_number} \
+  trainer.experiment_name=${experiment_name}_run${run_number}_slu${SLURM_JOB_ID} \
   trainer.group=${experiment_name} \
   trainer.val_before_train=True \
-  trainer.critic_warmup=40 \
+  trainer.critic_warmup=20 \
   trainer.critic_warmup_step=5 \
+  critic.critic_warmup_micro_batch_size_per_gpu=64 \
   trainer.n_gpus_per_node=$number_of_gpus \
   trainer.nnodes=1 \
   trainer.save_freq=50 \
   trainer.test_freq=50 \
   trainer.render=False \
-  trainer.total_epochs=600 \
+  trainer.total_epochs=1000 \
   trainer.default_local_dir=/scratch/jsbd1n24/checkpoints/${project_name}/${experiment_name}_run${run_number} \
   trainer.max_actor_ckpt_to_keep=1 \
   trainer.max_critic_ckpt_to_keep=1 \
-  evaluation=eval_1 2>&1 | tee verl_demo.log
+  evaluation=snake_evals_128 \
+  prompt=snake_128 2>&1 | tee verl_demo.log
 
 # --- Cleanup Ray Cluster ---
 if [ -n "$RAY_HEAD_PID" ]; then

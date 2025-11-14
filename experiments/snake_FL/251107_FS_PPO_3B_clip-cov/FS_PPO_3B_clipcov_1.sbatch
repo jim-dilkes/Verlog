@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=FS_PPO_Q3_4B_1
+#SBATCH --job-name=FS_PPO_3B_clipcov_1
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --mem=250GB
@@ -8,7 +8,13 @@
 #SBATCH --cpus-per-task=6
 #SBATCH --partition=swarm_a100,swarm_h100,a100
 #SBATCH --time=35:59:59
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=2
+
+# --- Define experiment variables ---
+project_name=AAMAS_msrl
+experiment_name=FS_PPO_3B_clipcov
+run_number=1
+number_of_gpus=2
 
 # --- Setup ---
 module load conda/python3
@@ -18,9 +24,6 @@ module load gcc/13.3.0
 cd Verlog
 eval "$(conda shell.bash hook)"
 conda activate verlog_new
-
-run_number=1
-number_of_steps=1000
 
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -43,12 +46,10 @@ export RAY_DEDUP_LOGS=0
 export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=0
 
 # --- Define model and batch size ---
-model=Qwen/Qwen3-4B-Instruct-2507
+model=Qwen/Qwen2.5-3B-Instruct
+# model=/scratch/jsbd1n24/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct
 micro_batch_size=8
 
-# --- Define experiment variables ---
-project_name=AAMAS_msrl
-experiment_name=FS_PPO_Q3_4B_thinking
 
 # --- Run your main application ---
 PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
@@ -59,12 +60,19 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
-  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=$number_of_gpus \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
   actor_rollout_ref.model.path=$model \
   actor_rollout_ref.rollout.temperature=1.25 \
   actor_rollout_ref.rollout.top_k=-1 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.5 \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.actor.policy_loss.loss_mode=clip_cov \
+  actor_rollout_ref.actor.policy_loss.clip_cov_ratio=0.0002 \
+  actor_rollout_ref.actor.policy_loss.clip_cov_lb=1.0  \
+  actor_rollout_ref.actor.policy_loss.clip_cov_ub=5.0  \
+  actor_rollout_ref.actor.policy_loss.kl_cov_ratio=0.0002  \
+  actor_rollout_ref.actor.policy_loss.ppo_kl_coef=0.1  \
   critic.model.path=$model \
   critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
   critic.highlight_first=True \
@@ -88,21 +96,21 @@ PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 python3 -m verl.trainer.main_ppo \
   envs.fastsnake_kwargs.num_random_snakes=1 \
   envs.fastsnake_kwargs.death_reward=-1 \
   trainer.project_name=$project_name \
-  trainer.experiment_name=${experiment_name}_run${run_number}_slurm${SLURM_JOB_ID} \
+  trainer.experiment_name=${experiment_name}_run${run_number} \
   trainer.group=${experiment_name} \
   trainer.val_before_train=True \
   trainer.critic_warmup=40 \
   trainer.critic_warmup_step=5 \
-  trainer.n_gpus_per_node=1 \
+  trainer.n_gpus_per_node=$number_of_gpus \
   trainer.nnodes=1 \
   trainer.save_freq=50 \
   trainer.test_freq=50 \
   trainer.render=False \
-  trainer.total_epochs=$number_of_steps \
+  trainer.total_epochs=600 \
   trainer.default_local_dir=/scratch/jsbd1n24/checkpoints/${project_name}/${experiment_name}_run${run_number} \
   trainer.max_actor_ckpt_to_keep=1 \
   trainer.max_critic_ckpt_to_keep=1 \
-  evaluation=eval_1 2>&1 | tee verl_demo.log
+  evaluation=snake_evals 2>&1 | tee verl_demo.log
 
 # --- Cleanup Ray Cluster ---
 if [ -n "$RAY_HEAD_PID" ]; then
