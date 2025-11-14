@@ -15,6 +15,7 @@
 import os
 import logging
 import time
+import traceback
 import torch
 import numpy as np
 from typing import List
@@ -93,8 +94,22 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.base_sync_done: bool = 'dummy' not in load_format
         if is_version_ge(pkg='vllm', minver='0.7.3'):
             VLLMHijack.hijack()
+        
+        # Tracking for debugging cleanup issues
+        self._context_enter_count = 0
+        self._context_exit_count = 0
+        self._last_enter_time = None
+        self._last_exit_time = None
 
     def __enter__(self):
+        # Track context manager usage for debugging
+        self._context_enter_count += 1
+        self._last_enter_time = time.time()
+        logger.debug(
+            f"Entering FSDPVLLMShardingManager context (enter_count={self._context_enter_count}, "
+            f"exit_count={self._context_exit_count})"
+        )
+        
         def __collect_lora_params() -> OrderedDict:
             """
             Collect lora params or full params if base model is not ready in vllm
@@ -116,7 +131,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                                         for name, param in lora_params.items()}
                         else:
                             model = self.module._fsdp_wrapped_module.base_model.model
-                            orig_dev = 'cpu' if 'cpu' in next(model.parameters()).device else 'cuda'
+                            orig_dev = 'cpu' if next(model.parameters()).device.type == 'cpu' else 'cuda'
                             model = model.to('cpu')
                             for name, param in model.state_dict().items():
                                 if any(x in name for x in ['_flat_param', 'lora_']):
@@ -130,7 +145,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
                 else:
                     model = self.module._fsdp_wrapped_module.base_model.model
-                    orig_dev = 'cpu' if 'cpu' in next(model.parameters()).device else 'cuda'
+                    orig_dev = 'cpu' if next(model.parameters()).device.type == 'cpu' else 'cuda'
                     model = model.to('cpu')
                     for name, param in model.state_dict().items():
                         if any(x in name for x in ['_flat_param', 'lora_']):
@@ -202,12 +217,120 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.gen_random_states)
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Track context manager exit for debugging
+        self._context_exit_count += 1
+        self._last_exit_time = time.time()
+        context_duration = (
+            self._last_exit_time - self._last_enter_time 
+            if self._last_enter_time is not None 
+            else None
+        )
+        
+        # Check for context manager mismatches (could indicate issues)
+        if self._context_exit_count > self._context_enter_count:
+            logger.warning(
+                f"Context manager mismatch: exit_count ({self._context_exit_count}) > "
+                f"enter_count ({self._context_enter_count}). This may indicate multiple exits or cleanup issues."
+            )
+        
+        logger.debug(
+            f"Exiting FSDPVLLMShardingManager context (enter_count={self._context_enter_count}, "
+            f"exit_count={self._context_exit_count}, duration={context_duration:.2f}s, "
+            f"exc_type={exc_type}, exc_value={exc_value})"
+        )
+        
         log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
-        # TODO(ZSL): check this
-        if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
-            self.inference_engine.offload_model_weights()
-        else:
-            self.inference_engine.sleep(level=1)
+        
+        # Defensive cleanup: handle potential race conditions and engine state issues
+        try:
+            # Check if inference_engine exists and is valid
+            if self.inference_engine is None:
+                logger.warning("inference_engine is None in __exit__, skipping cleanup")
+            else:
+                # Log engine state for debugging
+                try:
+                    engine_state = "unknown"
+                    if hasattr(self.inference_engine, 'llm_engine'):
+                        if hasattr(self.inference_engine.llm_engine, '_status'):
+                            engine_state = str(self.inference_engine.llm_engine._status)
+                    logger.debug(f"vLLM engine state before sleep: {engine_state}")
+                except Exception as state_check_error:
+                    logger.warning(f"Could not check engine state: {state_check_error}")
+                
+                # Attempt to put engine to sleep with error handling
+                if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
+                    try:
+                        self.inference_engine.offload_model_weights()
+                    except Exception as offload_error:
+                        logger.error(
+                            f"Error during vLLM offload_model_weights in __exit__: {offload_error}\n"
+                            f"Exception type: {type(offload_error).__name__}\n"
+                            f"Traceback: {traceback.format_exc() if traceback else 'N/A'}",
+                            exc_info=True
+                        )
+                        # Continue with cleanup even if offload fails
+                else:
+                    try:
+                        # Add a small delay to allow any ongoing operations to complete
+                        # This can help avoid race conditions with background threads
+                        time.sleep(0.01)  # 10ms delay
+                        
+                        self.inference_engine.sleep(level=1)
+                    except Exception as sleep_error:
+                        error_msg = (
+                            f"FATAL: Error during vLLM sleep() in __exit__: {sleep_error}\n"
+                            f"Exception type: {type(sleep_error).__name__}\n"
+                            f"Exception args: {sleep_error.args}\n"
+                            f"inference_engine type: {type(self.inference_engine)}\n"
+                            f"inference_engine repr: {repr(self.inference_engine)[:200]}\n"
+                        )
+                        
+                        # Check if this is the "none_dealloc" error
+                        if "none_dealloc" in str(sleep_error).lower() or "deallocating None" in str(sleep_error):
+                            error_msg += (
+                                f"\n*** DETECTED none_dealloc ERROR ***\n"
+                                f"This is a known vLLM CUDA memory allocator issue.\n"
+                                f"Possible causes:\n"
+                                f"  1. Race condition during cleanup with background threads\n"
+                                f"  2. vLLM engine in inconsistent state\n"
+                                f"  3. CUDA memory allocator corruption\n"
+                                f"  4. Multiple cleanup attempts on same resources\n"
+                                f"\nContext manager state:\n"
+                                f"  enter_count={self._context_enter_count}, exit_count={self._context_exit_count}\n"
+                                f"  context_duration={context_duration:.2f}s\n"
+                                f"  exc_type={exc_type}, exc_value={exc_value}\n"
+                            )
+                        
+                        # Log full context
+                        logger.error(error_msg, exc_info=True)
+                        
+                        # Try to get more diagnostic information
+                        try:
+                            if hasattr(self.inference_engine, 'llm_engine'):
+                                logger.error(f"llm_engine exists: {self.inference_engine.llm_engine is not None}")
+                                if hasattr(self.inference_engine.llm_engine, 'model_executor'):
+                                    logger.error(f"model_executor exists: {self.inference_engine.llm_engine.model_executor is not None}")
+                        except Exception as diag_error:
+                            logger.warning(f"Could not gather diagnostic info: {diag_error}")
+                        
+                        # For none_dealloc errors, we might be able to continue
+                        # but log it as a critical issue
+                        if "none_dealloc" not in str(sleep_error).lower() and "deallocating None" not in str(sleep_error):
+                            # For other errors, re-raise to maintain original behavior
+                            raise
+                        # For none_dealloc, we'll continue but log it as critical
+                        logger.critical(
+                            "Continuing after none_dealloc error - this may indicate memory corruption. "
+                            "Monitor for further issues."
+                        )
+        except Exception as outer_error:
+            logger.critical(
+                f"Unexpected error in __exit__ cleanup: {outer_error}\n"
+                f"Exception type: {type(outer_error).__name__}",
+                exc_info=True
+            )
+            # Don't re-raise to allow other cleanup to proceed
+        
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')

@@ -1,0 +1,1556 @@
+commit 16f6c1ee6524f1754d5d5570fba0fc8bc2ff1b0b
+Author: thelongestusernameofall <thelongestusernameofall@gmail.com>
+Date:   Thu May 29 01:53:47 2025 +0800
+
+    [feat] lora: new feature -- LoRA support for PPO  (#1127)
+    
+    Co-Authored-By: Stephen Xie <stephenx@berkeley.edu>
+    Co-Authored-By: Tony Lian <longlian@berkeley.edu>
+    Co-Authored-By: Jiayi Pan <jiayipan@berkeley.edu>
+    Co-Authored-By: Simon Huang <thelongestusernameofall@gmail.com>
+    
+    测试脚本如下：
+    
+    
+    ```
+    #!/bin/bash
+    #
+    #   Author  :   simon huang
+    #   Date    :   2025年04月15日14:20:30
+    #
+    #   For GRPO LoRA Support Dev
+    #
+    
+    set -x
+    ## master:
+    # ray start --head --port=6379
+    
+    ## slave:
+    # ray start --address='localhost:6379'
+    
+    
+    # export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export WANDB_DIR=wandb-kkr1-lora-4p3bv1
+    export WANDB_PROJECT=simon-kkr1-lora-4p3bv1
+    
+    # wandb server start --port 9090
+    export WANDB_BASE_URL=http://wandblocal:9000
+    export WANDB_API_KEY=local-5239e89783ebebea9bac5509e2bd1a8e734f55f7
+    # wandb login --relogin --host=http://wandblocal:9000
+    # export WANDB_MODE=offline
+    
+    MODEL_PATH=/data1/models/Qwen/Qwen2.5-0.5B-Instruct
+    
+    export VLLM_ATTENTION_BACKEND=XFORMERS
+    
+    nproc_per_gpu=1
+    nnodes=1
+    nproc_per_node=2
+    total_procs=$(( nproc_per_gpu * nnodes * nproc_per_node ))
+    mini_batch_size=$(( total_procs ))
+    
+    python3 -m verl.trainer.main_ppo \
+        --config-name=lora-ppo_trainer.yaml \
+        algorithm.adv_estimator=grpo \
+        data.train_files=data/kk/parquet/train.parquet \
+        data.val_files=data/kk/parquet/val.parquet \
+        data.train_batch_size=${total_procs} \
+        data.val_batch_size=${total_procs} \
+        data.max_prompt_length=2000 \
+        data.max_response_length=600 \
+        actor_rollout_ref.model.path=$MODEL_PATH\
+        actor_rollout_ref.model.enable_gradient_checkpointing=True \
+        actor_rollout_ref.model.lora_rank=8 \
+        actor_rollout_ref.model.lora_alpha=16 \
+        actor_rollout_ref.model.target_modules=[k_proj,v_proj] \
+        actor_rollout_ref.actor.optim.lr=3e-6 \
+        actor_rollout_ref.model.use_remove_padding=True \
+        actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \
+        actor_rollout_ref.actor.ppo_micro_batch_size=${mini_batch_size} \
+        actor_rollout_ref.actor.use_kl_loss=False \
+        actor_rollout_ref.actor.kl_loss_coef=0.001 \
+        actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+        actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
+        actor_rollout_ref.actor.fsdp_config.param_offload=False \
+        actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size=${mini_batch_size} \
+        actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+        actor_rollout_ref.rollout.name=vllm \
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
+        actor_rollout_ref.rollout.n=2 \
+        actor_rollout_ref.rollout.max_num_seqs=4 \
+        actor_rollout_ref.rollout.max_model_len=4000 \
+        actor_rollout_ref.rollout.max_num_batched_tokens=4000 \
+        actor_rollout_ref.rollout.enable_chunked_prefill=False \
+        actor_rollout_ref.ref.log_prob_micro_batch_size=${mini_batch_size} \
+        actor_rollout_ref.ref.fsdp_config.param_offload=False \
+        actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
+        actor_rollout_ref.actor.entropy_coeff=0.001 \
+        algorithm.kl_ctrl.kl_coef=0.001 \
+        reward_model.reward_manager=naive \
+        trainer.critic_warmup=0 \
+        trainer.logger=['console','wandb'] \
+        trainer.project_name=$WANDB_PROJECT \
+        trainer.experiment_name=$WANDB_PROJECT \
+        trainer.n_gpus_per_node=${nproc_per_node} \
+        trainer.nnodes=${nnodes} \
+        trainer.default_local_dir=$WANDB_PROJECT \
+        trainer.default_hdfs_dir=null \
+        trainer.save_freq=1 \
+        trainer.test_freq=1 \
+        trainer.total_epochs=8 $@ 2>&1 | tee ${WANDB_PROJECT}.log
+    
+    ```
+    
+    
+    输出log如下：
+    
+    ```
+    (TaskRunner pid=2931272)   [Error] </answer> appears 0 times (expected 1)
+    (TaskRunner pid=2931272)   [Error] Incorrect tag order: Expected <think>...</think><answer>...</answer>
+    (TaskRunner pid=2931272)
+    (TaskRunner pid=2931272)   Format validation: FAIL
+    (TaskRunner pid=2931272)   Format score: -2
+    (TaskRunner pid=2931272)
+    (TaskRunner pid=2931272) [Content Validation] Skipped due to format errors or missing answer
+    (TaskRunner pid=2931272)
+    (TaskRunner pid=2931272) --------------------------------------------------------------------------------
+    (TaskRunner pid=2931272) --------------------------------- Final Score ----------------------------------
+    (TaskRunner pid=2931272)   Format: -2
+    (TaskRunner pid=2931272)   Answer: -2
+    (TaskRunner pid=2931272)   Total: -4
+    (TaskRunner pid=2931272) ================================================================================
+    (TaskRunner pid=2931272)
+    (TaskRunner pid=2931272) local_global_step_folder: simon-kkr1-lora-4p3bv1/global_step_10
+    (WorkerDict pid=2948236) [rank-0]: LoRA adapter saved to simon-kkr1-lora-4p3bv1/global_step_10/actor/lora_adapter
+    Training Progress:   0%|          | 10/47200 [05:16<308:34:14, 23.54s/it]
+    (WorkerDict pid=2948236) [rank-0]: Saving model to /mnt/h800fast/simon/research/Train/RL/volcengine/simonverl/simon-kkr1-lora-4p3bv1/global_step_10/actor/model_world_size_2_rank_0.pt
+    (WorkerDict pid=2948236) [rank-0]: Saving checkpoint to /mnt/h800fast/simon/research/Train/RL/volcengine/simonverl/simon-kkr1-lora-4p3bv1/global_step_10/actor/model_world_size_2_rank
+    _0.pt
+    (WorkerDict pid=2948236) [rank-0]: Saving extra_state to /mnt/h800fast/simon/research/Train/RL/volcengine/simonverl/simon-kkr1-lora-4p3bv1/global_step_10/actor/extra_state_world_size
+    _2_rank_0.pt
+    (TaskRunner pid=2931272) step:10 - global_seqlen/min:1981.000 - global_seqlen/max:4883.000 - global_seqlen/minmax_diff:2902.000 - global_seqlen/balanced_min:3417.000 - global_seqlen/bal
+    anced_max:3447.000 - global_seqlen/mean:3432.000 - actor/entropy:1.657 - actor/pg_loss:0.000 - actor/pg_clipfrac:0.000 - actor/ppo_kl:0.000 - actor/pg_clipfrac_lower:0.000 - actor/grad_
+    norm:1.258 - perf/mfu/actor:0.034 - perf/max_memory_allocated_gb:12.799 - perf/max_memory_reserved_gb:13.301 - perf/cpu_memory_used_gb:49.778 - actor/lr:0.000 - val-core/simon-kkr1/rewar
+    d/mean@1:-5.278 - val-aux/simon-kkr1/reward/std@1:0.000 - val-core/simon-kkr1/reward/best@1/mean:-5.278 - val-core/simon-kkr1/reward/best@1/std:0.000 - val-aux/simon-kkr1/reward/worst@1/mea
+    n:-5.278 - val-aux/simon-kkr1/reward/worst@1/std:0.000 - critic/score/mean:-3.658 - critic/score/max:-1.638 - critic/score/min:-5.734 - critic/rewards/mean:-3.658 - critic/rewards/max:-1
+    .638 - critic/rewards/min:-5.734 - critic/advantages/mean:-0.174 - critic/advantages/max:0.707 - critic/advantages/min:-0.707 - critic/returns/mean:-0.174 - critic/returns/max:0.707 - c
+    ritic/returns/min:-0.707 - response_length/mean:81.500 - response_length/max:150.000 - response_length/min:28.000 - response_length/clip_ratio:0.000 - prompt_length/mean:1634.500 - prom
+    pt_length/max:2319.000 - prompt_length/min:950.000 - prompt_length/clip_ratio:0.000 - timing_s/gen:3.607 - timing_s/old_log_prob:0.482 - timing_s/adv:0.015 - timing_s/update_actor:1.428
+     - timing_s/testing:5.142 - timing_s/save_checkpoint:2.504 - timing_s/step:13.183 - timing_per_token_ms/adv:0.002 - timing_per_token_ms/update_actor:0.208 - timing_per_token_ms/gen:11.0
+    65 - perf/total_num_tokens:6864.000 - perf/time_per_step:13.183 - perf/throughput:260.329
+    (TaskRunner pid=2931272)
+    (TaskRunner pid=2931272) ================================================================================
+    (TaskRunner pid=2931272) ============================ Processing New Sample =============================
+    (TaskRunner pid=2931272) [Warnning] Failed to locate model response header
+    (TaskRunner pid=2931272)
+    ```
+    
+    LoRA adapter会和Checkpoint一同保存，截图如下：
+    <img width="831" alt="image"
+    src="https://github.com/user-attachments/assets/5b8b2283-decc-499a-b08c-62dcaa961c9f"
+    />
+    
+    
+    少量训练后的reward@worst曲线：
+    <img width="511" alt="image"
+    src="https://github.com/user-attachments/assets/d3253782-50b8-4f42-b203-38a09685dc24"
+    />
+    
+    ---------
+    
+    Co-authored-by: Stephen Xie <stephenx@berkeley.edu>
+    Co-authored-by: Tony Lian <longlian@berkeley.edu>
+    Co-authored-by: Jiayi Pan <jiayipan@berkeley.edu>
+    Co-authored-by: Chi Zhang <zhangchi.usc1992@bytedance.com>
+
+diff --git a/.github/workflows/e2e_ppo_trainer.yml b/.github/workflows/e2e_ppo_trainer.yml
+index 421d57f7..39372a3f 100644
+--- a/.github/workflows/e2e_ppo_trainer.yml
++++ b/.github/workflows/e2e_ppo_trainer.yml
+@@ -123,6 +123,15 @@ jobs:
+         run: |
+           ray stop --force
+           USE_KL=True bash tests/e2e/ppo_trainer/run_function_reward.sh
++      # LoRA tests
++      - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm
++        run: |
++          ray stop --force
++          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors bash tests/e2e/ppo_trainer/run_function_reward.sh
++      - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
++        run: |
++          ray stop --force
++          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True bash tests/e2e/ppo_trainer/run_function_reward.sh
+       # Model RM
+       - name: Running GRPO GSM8K E2E training tests with FSDP on 8 L20 GPUs (DeepSeek)
+         run: |
+diff --git a/examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh b/examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh
+new file mode 100644
+index 00000000..eafac3d4
+--- /dev/null
++++ b/examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh
+@@ -0,0 +1,49 @@
++set -x
++
++# If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
++# export VLLM_ATTENTION_BACKEND=XFORMERS
++
++python3 -m verl.trainer.main_ppo \
++    algorithm.adv_estimator=grpo \
++    data.train_files=$HOME/data/gsm8k/train.parquet \
++    data.val_files=$HOME/data/gsm8k/test.parquet \
++    data.train_batch_size=1024 \
++    data.max_prompt_length=512 \
++    data.max_response_length=1024 \
++    data.filter_overlong_prompts=True \
++    data.truncation='error' \
++    data.shuffle=False \
++    actor_rollout_ref.model.path=Qwen/Qwen2.5-3B-Instruct \
++    actor_rollout_ref.model.use_shm=True \
++    actor_rollout_ref.model.lora_rank=64 \
++    actor_rollout_ref.model.lora_alpha=32 \
++    actor_rollout_ref.actor.optim.lr=3e-6 \
++    actor_rollout_ref.model.use_remove_padding=True \
++    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
++    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=40 \
++    actor_rollout_ref.actor.use_kl_loss=True \
++    actor_rollout_ref.actor.kl_loss_coef=0.001 \
++    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
++    actor_rollout_ref.actor.entropy_coeff=0 \
++    actor_rollout_ref.model.enable_gradient_checkpointing=True \
++    actor_rollout_ref.actor.fsdp_config.param_offload=False \
++    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
++    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=40 \
++    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
++    actor_rollout_ref.rollout.name=vllm \
++    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
++    actor_rollout_ref.rollout.n=5 \
++    actor_rollout_ref.rollout.load_format=safetensors \
++    actor_rollout_ref.rollout.layered_summon=True \
++    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=40 \
++    actor_rollout_ref.ref.fsdp_config.param_offload=True \
++    algorithm.use_kl_in_reward=False \
++    trainer.critic_warmup=0 \
++    trainer.logger=['console','wandb'] \
++    trainer.project_name='verl_grpo_example_gsm8k' \
++    trainer.experiment_name='qwen2.5_3b_grpo_lora' \
++    trainer.n_gpus_per_node=8 \
++    trainer.nnodes=1 \
++    trainer.save_freq=20 \
++    trainer.test_freq=5 \
++    trainer.total_epochs=15 $@
+\ No newline at end of file
+diff --git a/tests/e2e/ppo_trainer/run_function_reward.sh b/tests/e2e/ppo_trainer/run_function_reward.sh
+index 661be253..c49cdf83 100644
+--- a/tests/e2e/ppo_trainer/run_function_reward.sh
++++ b/tests/e2e/ppo_trainer/run_function_reward.sh
+@@ -23,6 +23,12 @@ ADV_ESTIMATOR=${ADV_ESTIMATOR:-gae}
+ USE_KL=${USE_KL:-False}
+ CUSTOM_REWARD_FN=${CUSTOM_REWARD_FN:-False}
+ ENABLE_CHUNKED_PREFILL=${ENABLE_CHUNKED_PREFILL:-True} # For vLLM VLM placeholder issue: https://github.com/vllm-project/vllm/issues/15185
++# LoRA config
++LORA_RANK=${LORA_RANK:-0}
++LORA_ALPHA=${LORA_ALPHA:-${LORA_RANK}}
++USE_SHM=${USE_SHM:-False}
++LOAD_FORMAT=${LOAD_FORMAT:-dummy_dtensor}
++LAYERED_SUMMON=${LAYERED_SUMMON:-False}
+ # Validation
+ VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+ TEST_FREQ=${TEST_FREQ:--1}
+@@ -75,6 +81,9 @@ python3 -m verl.trainer.main_ppo \
+     data.max_prompt_length="${MAX_PROMPT_LEN}" \
+     data.max_response_length="${MAX_RESPONSE_LEN}" \
+     actor_rollout_ref.model.path="${MODEL_PATH}" \
++    actor_rollout_ref.model.use_shm=${USE_SHM} \
++    actor_rollout_ref.model.lora_rank=${LORA_RANK} \
++    actor_rollout_ref.model.lora_alpha=${LORA_ALPHA} \
+     actor_rollout_ref.actor.optim.lr=1e-6 \
+     actor_rollout_ref.model.use_remove_padding="${RM_PAD}" \
+     actor_rollout_ref.model.use_fused_kernels=${FUSED_KERNELS} \
+@@ -88,6 +97,8 @@ python3 -m verl.trainer.main_ppo \
+     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
+     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+     actor_rollout_ref.rollout.name="${ENGINE}" \
++    actor_rollout_ref.rollout.load_format=${LOAD_FORMAT} \
++    actor_rollout_ref.rollout.layered_summon=${LAYERED_SUMMON} \
+     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
+     actor_rollout_ref.rollout.enable_chunked_prefill="${ENABLE_CHUNKED_PREFILL}" \
+     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
+diff --git a/verl/trainer/config/ppo_trainer.yaml b/verl/trainer/config/ppo_trainer.yaml
+index b70cb69a..55169e4f 100644
+--- a/verl/trainer/config/ppo_trainer.yaml
++++ b/verl/trainer/config/ppo_trainer.yaml
+@@ -1,5 +1,6 @@
+ data:
+   tokenizer: null
++  use_shm: False
+   train_files: ~/data/rlhf/gsm8k/train.parquet
+   val_files: ~/data/rlhf/gsm8k/test.parquet
+   prompt_key: prompt
+@@ -25,11 +26,15 @@ actor_rollout_ref:
+   hybrid_engine: True
+   model:
+     path: ~/models/deepseek-llm-7b-chat
++    use_shm: False
+     external_lib: null
+     override_config: { }
+     enable_gradient_checkpointing: True
+     enable_activation_offload: False
+     use_remove_padding: False
++    lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
++    lora_alpha: 16  # LoRA scaling factor
++    target_modules: all-linear  # all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
+     use_liger: False
+     use_fused_kernels: False
+     trust_remote_code: False
+@@ -105,7 +110,8 @@ actor_rollout_ref:
+     ignore_eos: False
+     enforce_eager: True
+     free_cache_engine: True
+-    load_format: dummy_dtensor
++    load_format: dummy_dtensor  # safetensors (for huge model, and set use_shm=True); dummy_dtensor: randomly init model weight
++    layered_summon: False # for huge model, layered summon can save memory (prevent OOM) but make it slower
+     tensor_model_parallel_size: 2
+     max_num_batched_tokens: 8192
+     max_model_len: null
+@@ -150,6 +156,7 @@ critic:
+     weight_decay: 0.01
+   model:
+     path: ~/models/deepseek-llm-7b-chat
++    use_shm: False
+     tokenizer_path: ${actor_rollout_ref.model.path}
+     override_config: { }
+     external_lib: ${actor_rollout_ref.model.external_lib}
+@@ -166,6 +173,9 @@ critic:
+         # transformer_layer_cls_to_wrap: None
+         min_num_params: 0
+       fsdp_size: -1
++    lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
++    lora_alpha: 16  # LoRA scaling factor
++    target_modules: all-linear  # all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
+   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+   ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+   ppo_micro_batch_size_per_gpu: null
+@@ -189,6 +199,7 @@ reward_model:
+   model:
+     input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+     path: ~/models/FsfairX-LLaMA3-RM-v0.1
++    use_shm: False
+     external_lib: ${actor_rollout_ref.model.external_lib}
+     use_remove_padding: False
+     use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels}
+diff --git a/verl/trainer/config/sft_trainer.yaml b/verl/trainer/config/sft_trainer.yaml
+index 1a690209..9b0a42dc 100644
+--- a/verl/trainer/config/sft_trainer.yaml
++++ b/verl/trainer/config/sft_trainer.yaml
+@@ -20,8 +20,10 @@ data:
+   custom_cls:
+     path: null
+     name: null
++  use_shm: False
+ model:
+   partial_pretrain: ~/models/gemma-1.1-7b-it
++  use_shm: False
+   fsdp_config:
+     wrap_policy:
+       min_num_params: 0
+diff --git a/verl/trainer/fsdp_sft_trainer.py b/verl/trainer/fsdp_sft_trainer.py
+index 018b5ca3..57fa7eb6 100644
+--- a/verl/trainer/fsdp_sft_trainer.py
++++ b/verl/trainer/fsdp_sft_trainer.py
+@@ -48,6 +48,7 @@ from verl.utils.distributed import initialize_global_process_group
+ from verl.utils.fs import copy_to_local
+ from verl.utils.fsdp_utils import get_fsdp_wrap_policy, get_init_weight_context_manager, init_fn
+ from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_wsd_schedule_with_warmup
++from verl.utils.py_functional import convert_to_regular_types
+ from verl.utils.tracking import Tracking
+ from verl.utils.ulysses import (
+     gather_outpus_and_unpad,
+@@ -74,19 +75,6 @@ def extract_step(path):
+     return None
+ 
+ 
+-def convert_to_regular_types(obj):
+-    """Convert Hydra configs and other special types to regular Python types."""
+-    from omegaconf import DictConfig, ListConfig
+-
+-    if isinstance(obj, (ListConfig, DictConfig)):
+-        return {k: convert_to_regular_types(v) for k, v in obj.items()} if isinstance(obj, DictConfig) else list(obj)
+-    elif isinstance(obj, (list, tuple)):
+-        return [convert_to_regular_types(x) for x in obj]
+-    elif isinstance(obj, dict):
+-        return {k: convert_to_regular_types(v) for k, v in obj.items()}
+-    return obj
+-
+-
+ class FSDPSFTTrainer:
+     def __init__(self, config, device_mesh: DeviceMesh, ulysses_device_mesh: DeviceMesh, tokenizer, train_dataset: Dataset, val_dataset: Dataset):
+         self.config = config
+diff --git a/verl/trainer/main_eval.py b/verl/trainer/main_eval.py
+index 57fbe675..ff752253 100644
+--- a/verl/trainer/main_eval.py
++++ b/verl/trainer/main_eval.py
+@@ -73,7 +73,7 @@ def process_item(reward_fn, data_source, response_lst, reward_data):
+ 
+ @hydra.main(config_path="config", config_name="evaluation", version_base=None)
+ def main(config):
+-    local_path = copy_to_local(config.data.path)
++    local_path = copy_to_local(config.data.path, use_shm=config.data.get('use_shm', False))
+     dataset = pd.read_parquet(local_path)
+     responses = dataset[config.data.response_key]
+     data_sources = dataset[config.data.data_source_key]
+diff --git a/verl/trainer/main_ppo.py b/verl/trainer/main_ppo.py
+index 6cd00b83..2fa905a4 100644
+--- a/verl/trainer/main_ppo.py
++++ b/verl/trainer/main_ppo.py
+@@ -23,7 +23,6 @@ import ray
+ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+ from verl.trainer.ppo.reward import load_reward_manager
+ 
+-
+ def get_custom_reward_fn(config):
+     import importlib.util
+     import sys
+@@ -68,7 +67,8 @@ def run_ppo(config) -> None:
+     if not ray.is_initialized():
+         # this is for local ray cluster
+         ray.init(
+-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
++            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN",
++             "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+             num_cpus=config.ray_init.num_cpus,
+         )
+ 
+@@ -90,7 +90,7 @@ class TaskRunner:
+         OmegaConf.resolve(config)
+ 
+         # download the checkpoint from hdfs
+-        local_path = copy_to_local(config.actor_rollout_ref.model.path)
++        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get('use_shm', False))
+ 
+         # instantiate tokenizer
+         from verl.utils import hf_processor, hf_tokenizer
+@@ -99,6 +99,13 @@ class TaskRunner:
+         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+         processor = hf_processor(local_path, use_fast=True)  # used for multimodal LLM, could be none
+ 
++        # vllm early verify
++        if config.actor_rollout_ref.rollout.name in ["vllm"]:
++            from verl.utils.vllm_utils import is_version_ge
++            if config.actor_rollout_ref.model.get('lora_rank', 0) > 0:
++                if not is_version_ge(pkg='vllm', minver='0.7.3'):
++                    raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
++
+         # define worker classes
+         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+             assert config.critic.strategy in ["fsdp", "fsdp2"]
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index f5ce6ad1..231936a3 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -380,6 +380,9 @@ class RayPPOTrainer:
+         self.device_name = device_name
+         self.validation_generations_logger = ValidationGenerationsLogger()
+ 
++        # if ref_in_actor is True, the reference policy will be actor without lora applied
++        self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
++
+         # define in-reward KL control
+         # kl loss control currently not suppoorted
+         if config.algorithm.use_kl_in_reward:
+@@ -804,7 +807,7 @@ class RayPPOTrainer:
+             self.critic_wg = all_wg["critic"]
+             self.critic_wg.init_model()
+ 
+-        if self.use_reference_policy:
++        if self.use_reference_policy and not self.ref_in_actor:
+             self.ref_policy_wg = all_wg["ref"]
+             self.ref_policy_wg.init_model()
+ 
+@@ -1074,7 +1077,10 @@ class RayPPOTrainer:
+                     if self.use_reference_policy:
+                         # compute reference log_prob
+                         with _timer("ref", timing_raw):
+-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
++                            if not self.ref_in_actor:
++                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
++                            else:
++                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                             batch = batch.union(ref_log_prob)
+ 
+                     # compute values
+diff --git a/verl/utils/dataset/rl_dataset.py b/verl/utils/dataset/rl_dataset.py
+index e952af5e..f1c0d82f 100644
+--- a/verl/utils/dataset/rl_dataset.py
++++ b/verl/utils/dataset/rl_dataset.py
+@@ -110,6 +110,7 @@ class RLHFDataset(Dataset):
+ 
+         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
+         self.num_workers = min(self.num_workers, os.cpu_count())
++        self.use_shm = config.get('use_shm', False)
+         self.chat_template_func = config.get("chat_template_func", None)
+         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
+         self.filter_prompts = config.get("filter_prompts", True)
+@@ -122,7 +123,7 @@ class RLHFDataset(Dataset):
+ 
+         data_files = self.data_files if not use_origin_parquet else self.original_data_files
+         for i, parquet_file in enumerate(data_files):
+-            self.data_files[i] = copy_to_local(src=parquet_file, cache_dir=self.cache_dir)
++            self.data_files[i] = copy_to_local(src=parquet_file, cache_dir=self.cache_dir, use_shm=self.use_shm)
+ 
+     def _read_files_and_tokenize(self):
+         dataframes = []
+diff --git a/verl/utils/dataset/sft_dataset.py b/verl/utils/dataset/sft_dataset.py
+index aef245cf..135329ff 100644
+--- a/verl/utils/dataset/sft_dataset.py
++++ b/verl/utils/dataset/sft_dataset.py
+@@ -45,9 +45,11 @@ class SFTDataset(Dataset):
+         response_dict_keys = config.get("response_dict_keys", None)
+         max_length = config.get("max_length", 1024)
+         truncation = config.get("truncation", "error")
++        use_shm = config.get('use_shm', False)
+ 
+         assert truncation in ["error", "left", "right"]
+         self.truncation = truncation
++        self.use_shm = use_shm
+ 
+         if not isinstance(parquet_files, List):
+             parquet_files = [parquet_files]
+@@ -69,7 +71,7 @@ class SFTDataset(Dataset):
+ 
+     def _download(self):
+         for i, parquet_file in enumerate(self.parquet_files):
+-            self.parquet_files[i] = copy_to_local(parquet_file, verbose=True)
++            self.parquet_files[i] = copy_to_local(parquet_file, verbose=True, use_shm=self.use_shm)
+ 
+     def _read_files_and_tokenize(self):
+         def series_to_item(ls):
+@@ -96,6 +98,8 @@ class SFTDataset(Dataset):
+             except Exception:
+                 print(f"self.prompts={self.prompts}")
+                 raise
++        if isinstance(self.prompts, pd.DataFrame):
++            self.prompts = self.prompts.squeeze()
+         self.prompts = self.prompts.tolist()
+         self.responses = self.dataframe[self.response_key]
+         for key in self.response_dict_keys:
+@@ -104,6 +108,8 @@ class SFTDataset(Dataset):
+             except Exception:
+                 print(f"self.responses={self.responses}")
+                 raise
++        if isinstance(self.responses, pd.DataFrame):
++            self.responses = self.responses.squeeze()
+         self.responses = self.responses.tolist()
+ 
+     def __len__(self):
+diff --git a/verl/utils/debug/__init__.py b/verl/utils/debug/__init__.py
+index 5535f062..2e6221df 100644
+--- a/verl/utils/debug/__init__.py
++++ b/verl/utils/debug/__init__.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++from .performance import log_print
+ from .performance import GPUMemoryLogger, log_gpu_memory_usage
+ 
+ __all__ = ["GPUMemoryLogger", "log_gpu_memory_usage"]
+diff --git a/verl/utils/debug/performance.py b/verl/utils/debug/performance.py
+index dee5e7e6..c47c30e8 100644
+--- a/verl/utils/debug/performance.py
++++ b/verl/utils/debug/performance.py
+@@ -15,6 +15,12 @@
+ import logging
+ from typing import Tuple
+ 
++import logging
++from typing import Tuple
++
++import datetime
++import inspect
++from typing import Any
+ import torch
+ import torch.distributed as dist
+ 
+@@ -88,3 +94,12 @@ class GPUMemoryLogger(DecoratorLoggerBase):
+ 
+         self.logging_function(message)
+         return output
++
++def log_print(ctn: Any):
++    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
++
++    frame = inspect.currentframe().f_back
++    function_name = frame.f_code.co_name
++    line_number = frame.f_lineno
++    file_name = frame.f_code.co_filename.split('/')[-1]
++    print(f"[{file_name}:{line_number}:{function_name}]: {ctn}")
+\ No newline at end of file
+diff --git a/verl/utils/fs.py b/verl/utils/fs.py
+index a2a79096..2ffadaa0 100644
+--- a/verl/utils/fs.py
++++ b/verl/utils/fs.py
+@@ -20,6 +20,7 @@ import hashlib
+ import os
+ import shutil
+ import tempfile
++import hashlib
+ 
+ try:
+     from hdfs_io import copy, exists, makedirs  # for internal use only
+@@ -78,6 +79,83 @@ def get_local_temp_path(hdfs_path: str, cache_dir: str) -> str:
+     dst = os.path.join(temp_dir, os.path.basename(hdfs_path))
+     return dst
+ 
++def verify_copy(src: str, dest: str) -> bool:
++    """
++    verify the copy of src to dest by comparing their sizes and file structures.
++
++    return:
++        bool: True if the copy is verified, False otherwise.
++    """
++    if not os.path.exists(src):
++        return False
++    if not os.path.exists(dest):
++        return False
++
++    if os.path.isfile(src) != os.path.isfile(dest):
++        return False
++
++    if os.path.isfile(src):
++        src_size = os.path.getsize(src)
++        dest_size = os.path.getsize(dest)
++        if src_size != dest_size:
++            return False
++        return True
++
++    src_files = set()
++    dest_files = set()
++
++    for root, dirs, files in os.walk(src):
++        rel_path = os.path.relpath(root, src)
++        dest_root = os.path.join(dest, rel_path) if rel_path != '.' else dest
++
++        if not os.path.exists(dest_root):
++            return False
++
++        for entry in os.listdir(root):
++            src_entry = os.path.join(root, entry)
++            src_files.add(os.path.relpath(src_entry, src))
++
++        for entry in os.listdir(dest_root):
++            dest_entry = os.path.join(dest_root, entry)
++            dest_files.add(os.path.relpath(dest_entry, dest))
++
++    if src_files != dest_files:
++        return False
++
++    for rel_path in src_files:
++        src_entry = os.path.join(src, rel_path)
++        dest_entry = os.path.join(dest, rel_path)
++
++        if os.path.isdir(src_entry) != os.path.isdir(dest_entry):
++            return False
++
++        if os.path.isfile(src_entry):
++            src_size = os.path.getsize(src_entry)
++            dest_size = os.path.getsize(dest_entry)
++            if src_size != dest_size:
++                return False
++
++    return True
++
++
++def copy_to_shm(src:str):
++    """
++        Load the model into   /dev/shm   to make the process of loading the model multiple times more efficient.
++    """
++    shm_model_root = '/dev/shm/verl-cache/'
++    src_abs = os.path.abspath(os.path.normpath(src))
++    dest = os.path.join(shm_model_root, hashlib.md5(src_abs.encode('utf-8')).hexdigest())
++    os.makedirs(dest, exist_ok=True)
++    dest = os.path.join(dest, os.path.basename(src_abs))
++    if os.path.exists(dest) and verify_copy(src, dest):
++        # inform user and depends on him
++        print(f"[WARNING]: The memory model path {dest} already exists. If it is not you want, please clear it and restart the task.")
++    else:
++        if os.path.isdir(src):
++            shutil.copytree(src, dest, symlinks=False, dirs_exist_ok=True)
++        else:
++            shutil.copy2(src, dest)
++    return dest
+ 
+ def _record_directory_structure(folder_path):
+     record_file = os.path.join(folder_path, ".directory_record.txt")
+@@ -110,7 +188,7 @@ def _check_directory_structure(folder_path, record_file):
+     return existing_entries == recorded_entries
+ 
+ 
+-def copy_to_local(src: str, cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False) -> str:
++def copy_to_local(src: str, cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False, use_shm:bool=False) -> str:
+     """Copy files/directories from HDFS to local cache with validation.
+ 
+     Args:
+@@ -119,12 +197,17 @@ def copy_to_local(src: str, cache_dir=None, filelock=".file.lock", verbose=False
+         filelock (str): Base name for file lock. Defaults to ".file.lock"
+         verbose (bool): Enable copy operation logging. Defaults to False
+         always_recopy (bool): Force fresh copy ignoring cache. Defaults to False
++        use_shm (bool): Enable shared memory copy. Defaults to False
+ 
+     Returns:
+         str: Local filesystem path to copied resource
+     """
+-    return copy_local_path_from_hdfs(src, cache_dir, filelock, verbose, always_recopy)
+-
++    # Save to a local path for persistence.
++    local_path = copy_local_path_from_hdfs(src, cache_dir, filelock, verbose, always_recopy)
++    # Load into shm to improve efficiency.
++    if use_shm:
++        return copy_to_shm(local_path)
++    return local_path
+ 
+ def copy_local_path_from_hdfs(src: str, cache_dir=None, filelock=".file.lock", verbose=False, always_recopy=False) -> str:
+     """Deprecated. Please use copy_to_local instead."""
+diff --git a/verl/utils/fsdp_utils.py b/verl/utils/fsdp_utils.py
+index 53af8798..91e96731 100644
+--- a/verl/utils/fsdp_utils.py
++++ b/verl/utils/fsdp_utils.py
+@@ -19,6 +19,7 @@ import math
+ import os
+ from contextlib import contextmanager, nullcontext
+ from typing import Dict
++from collections import OrderedDict
+ 
+ import torch
+ import torch.distributed as dist
+@@ -457,3 +458,32 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
+     total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+     _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+     return total_norm
++
++def layered_summon_lora_params(fsdp_module)->OrderedDict:
++    from peft.utils.save_and_load import get_peft_model_state_dict
++
++    def __prefix_submodules(module, prefix):
++        for name, submodule in module.named_modules():
++            if name.startswith(prefix) and "." not in name[len(prefix):]:
++                yield name, submodule
++
++    lora_params = OrderedDict()
++    prefix_list = [
++        '_fsdp_wrapped_module.base_model.model.',
++        '_fsdp_wrapped_module.base_model.model.model.',
++        '_fsdp_wrapped_module.base_model.model.model.layers.'
++    ]
++    for prefix in prefix_list:
++        for name, submodule in __prefix_submodules(fsdp_module, prefix):
++            prefix = name.replace("_fsdp_wrapped_module.base_model.model.","base_model.model.")
++            if name.endswith('.model') or name.endswith('.layers'):
++                continue
++            if fsdp_version(submodule) > 0:
++                with FSDP.summon_full_params(submodule, writeback=False):
++                    sub_lora_params = get_peft_model_state_dict(fsdp_module._fsdp_wrapped_module, state_dict=submodule.state_dict())
++                    sub_lora_params = {f"{prefix}.{name}": param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu()
++                        for name, param in sub_lora_params.items()}
++                    lora_params.update(sub_lora_params)
++                    submodule._is_root = False
++                torch.cuda.empty_cache()
++    return lora_params
+\ No newline at end of file
+diff --git a/verl/utils/model.py b/verl/utils/model.py
+index b964bc63..3074ea0c 100644
+--- a/verl/utils/model.py
++++ b/verl/utils/model.py
+@@ -289,7 +289,7 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
+         from verl.utils.fs import copy_to_local
+ 
+         print(f"start download from {config.model.path}")
+-        local_model_path = copy_to_local(src=config.model.path, cache_dir=local_cache_path)
++        local_model_path = copy_to_local(src=config.model.path, cache_dir=local_cache_path, use_shm=config.model.get('use_shm', False))
+         print("finish download")
+     else:
+         local_model_path = config.model.path
+diff --git a/verl/utils/py_functional.py b/verl/utils/py_functional.py
+index 69c45f2f..fb6f6a7e 100644
+--- a/verl/utils/py_functional.py
++++ b/verl/utils/py_functional.py
+@@ -265,3 +265,14 @@ class DynamicEnum(metaclass=DynamicEnumMeta):
+     @classmethod
+     def from_name(cls, name: str) -> Optional["DynamicEnum"]:
+         return cls._registry.get(name.upper())
++
++def convert_to_regular_types(obj):
++    """Convert Hydra configs and other special types to regular Python types."""
++    from omegaconf import ListConfig, DictConfig
++    if isinstance(obj, (ListConfig, DictConfig)):
++        return {k: convert_to_regular_types(v) for k, v in obj.items()} if isinstance(obj, DictConfig) else list(obj)
++    elif isinstance(obj, (list, tuple)):
++        return [convert_to_regular_types(x) for x in obj]
++    elif isinstance(obj, dict):
++        return {k: convert_to_regular_types(v) for k, v in obj.items()}
++    return obj
+\ No newline at end of file
+diff --git a/verl/utils/vllm_utils.py b/verl/utils/vllm_utils.py
+index aa423190..784eefe1 100644
+--- a/verl/utils/vllm_utils.py
++++ b/verl/utils/vllm_utils.py
+@@ -40,6 +40,18 @@ try:
+ except ImportError:
+     pass
+ 
++from typing import List
++from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
++from vllm.lora.models import LoRAModel
++from vllm.lora.request import LoRARequest
++
++from verl.third_party.vllm import get_version
++from vllm.lora.utils import get_adapter_absolute_path
++
++from msgspec import field
++
++from packaging import version as vs
++
+ 
+ def patch_vllm_moe_model_weight_loader(model):
+     # this is a work around to load the weight of vllm fused moe model
+@@ -76,3 +88,104 @@ def patch_vllm_moe_model_weight_loader(model):
+         for name, param in param_dict.items():
+             if "w13_weight" in name or "w2_weight" in name:
+                 param.weight_loader = mlp.experts.weight_loader
++
++
++class TensorLoRARequest(LoRARequest):
++    peft_config:dict = field(default=None)
++    lora_tensors:dict = field(default=None)
++
++
++class VLLMHijack():
++    @staticmethod
++    def hijack():
++        def hijack__load_adapter(self, lora_request: TensorLoRARequest) -> LoRAModel:
++            """
++            based on vllm.lora.worker_manager.WorkerLoRAManager._load_adapter, support load adapter with lora tensors
++
++            Reason:
++            VLLM does not support adding LoRA from tensors directly. It only supports adding LoRA via file paths.
++            To synchronize the LoRA tensors of the actor model, we need to find a workaround to enable VLLM to load memory-based LoRA tensors.
++            """
++            try:
++                supported_lora_modules = (
++                    self._adapter_manager.supported_lora_modules)
++                packed_modules_mapping = (
++                    self._adapter_manager.packed_modules_mapping)
++                expected_lora_modules: List[str] = []
++                for module in supported_lora_modules:
++                    if module in packed_modules_mapping:
++                        expected_lora_modules.extend(
++                            packed_modules_mapping[module])
++                    else:
++                        expected_lora_modules.append(module)
++
++                expected_lora_modules = list(set(expected_lora_modules))
++
++                lora_tensors = None
++                from vllm.lora.peft_helper import PEFTHelper
++                if isinstance(lora_request, TensorLoRARequest):
++                    peft_config = lora_request.peft_config
++                    lora_tensors = lora_request.lora_tensors
++                    peft_helper = PEFTHelper.from_dict(peft_config)
++                else:
++                    lora_path = get_adapter_absolute_path(lora_request.lora_path)
++
++                    peft_helper = PEFTHelper.from_local_dir(
++                        lora_path, self.max_position_embeddings)
++
++                # Validates the LoRA configuration against requirements before
++                # loading weights, throwing an exception if validation fails.
++                peft_helper.validate_legal(self.lora_config)
++
++                # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
++                # to ensure correct loading of lora weights.
++                model = self._adapter_manager.model
++                hf_to_vllm_mapper = None
++                if (hasattr(model, "hf_to_vllm_mapper")
++                        and model.hf_to_vllm_mapper is not None):
++                    hf_to_vllm_mapper = model.hf_to_vllm_mapper
++
++                if isinstance(lora_request, TensorLoRARequest):
++                    lora = self._lora_model_cls.from_lora_tensors(
++                        lora_model_id=lora_request.lora_int_id,
++                        tensors=lora_tensors,
++                        peft_helper=peft_helper,
++                        device="cpu",
++                        dtype=self.lora_config.lora_dtype,
++                        embeddings=None,
++                        target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
++                        embedding_modules=self.embedding_modules,
++                        embedding_padding_modules=self.embedding_padding_modules,
++                        weights_mapper=hf_to_vllm_mapper
++                    )
++                else:
++                    lora = self._lora_model_cls.from_local_checkpoint(
++                        lora_path,
++                        expected_lora_modules,
++                        peft_helper=peft_helper,
++                        lora_model_id=lora_request.lora_int_id,
++                        device="cpu",
++                        dtype=self.lora_config.lora_dtype,
++                        target_embedding_padding=self.vocab_size +
++                        self.lora_config.lora_extra_vocab_size,
++                        embedding_modules=self.embedding_modules,
++                        embedding_padding_modules=self.embedding_padding_modules,
++                        weights_mapper=hf_to_vllm_mapper)
++            except Exception as e:
++                raise e
++
++            if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
++                raise ValueError(f"LoRA added vocab size {lora.extra_vocab_size} "
++                                f"is greater than lora_extra_vocab_size "
++                                f"{self.lora_config.lora_extra_vocab_size}.")
++            return lora
++
++        def do_hijack(target_cls, target_method_name, hooking_method):
++            setattr(target_cls, target_method_name, hooking_method)
++
++        do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
++
++
++def is_version_ge(pkg:str='vllm', minver:str="0.7.3"):
++    """ check if the package version is greater than or equal to the minimum version """
++    return vs.parse(get_version(pkg)) >= vs.parse(minver)
+\ No newline at end of file
+diff --git a/verl/workers/fsdp_workers.py b/verl/workers/fsdp_workers.py
+index 163826cd..4c29e3f3 100644
+--- a/verl/workers/fsdp_workers.py
++++ b/verl/workers/fsdp_workers.py
+@@ -28,6 +28,7 @@ from omegaconf import DictConfig, open_dict
+ from torch.distributed.device_mesh import init_device_mesh
+ 
+ import verl.utils.torch_functional as verl_F
++from verl.utils.py_functional import convert_to_regular_types
+ from verl import DataProto
+ from verl.models.transformers.monkey_patch import apply_monkey_patch
+ from verl.single_controller.base import Worker
+@@ -51,6 +52,7 @@ from verl.utils.fsdp_utils import (
+     load_fsdp_optimizer,
+     offload_fsdp_model_to_cpu,
+     offload_fsdp_optimizer,
++    layered_summon_lora_params,
+ )
+ from verl.utils.import_utils import import_external_libs
+ from verl.utils.model import compute_position_id_with_mask
+@@ -58,6 +60,17 @@ from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManage
+ from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
+ 
+ 
++from peft import LoraConfig, TaskType, get_peft_model
++from codetiming import Timer
++
++import torch.distributed as dist
++from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
++from peft import PeftModel
++from safetensors.torch import save_file
++from dataclasses import asdict
++import json
++
++
+ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ 
+@@ -113,6 +126,8 @@ class ActorRolloutRefWorker(Worker):
+             self.ulysses_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
+ 
+         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
++        self._lora_rank = self.config.model.get('lora_rank', 0)
++        self._is_lora = self._lora_rank > 0
+ 
+         self.role = role
+         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+@@ -178,7 +193,7 @@ class ActorRolloutRefWorker(Worker):
+         assert role in ["actor", "ref"]
+ 
+         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
+-        local_path = copy_to_local(model_path)
++        local_path = model_path
+ 
+         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
+         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
+@@ -242,6 +257,18 @@ class ActorRolloutRefWorker(Worker):
+ 
+             if enable_gradient_checkpointing:
+                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++            if self._is_lora:
++                print("Applying LoRA to actor module")
++                actor_module.enable_input_require_grads()
++                # Convert config to regular Python types before creating PEFT model
++                lora_config = {
++                    'task_type': TaskType.CAUSAL_LM,
++                    'r': self.config.model.lora_rank,
++                    'lora_alpha': self.config.model.lora_alpha,
++                    'target_modules': convert_to_regular_types(self.config.model.target_modules),
++                    'bias': "none"
++                }
++                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+         torch.distributed.barrier()
+ 
+         if self.rank == 0:
+@@ -262,7 +289,7 @@ class ActorRolloutRefWorker(Worker):
+ 
+         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+ 
+-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
++        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None), is_lora=self.config.model.get('lora_rank', 0) > 0)
+ 
+         if self._is_rollout and self.config.rollout.name == "hf":
+             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
+@@ -378,7 +405,9 @@ class ActorRolloutRefWorker(Worker):
+             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
+ 
+             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
+-            local_path = copy_to_local(self.config.model.path)
++            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get('use_shm', False))
++            lora_kwargs = {'lora_kwargs': {"enable_lora":True, "max_loras":1, "max_lora_rank":self._lora_rank}} if self._is_lora else {}
++            # lora_kwargs = {}
+             if vllm_mode == "customized":
+                 rollout = vLLMRollout(
+                     actor_module=self.actor_module_fsdp,
+@@ -386,7 +415,7 @@ class ActorRolloutRefWorker(Worker):
+                     tokenizer=self.tokenizer,
+                     model_hf_config=self.actor_model_config,
+                     trust_remote_code=trust_remote_code,
+-                )
++                    **lora_kwargs)
+             elif vllm_mode == "spmd":
+                 from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+ 
+@@ -398,20 +427,21 @@ class ActorRolloutRefWorker(Worker):
+                     model_hf_config=self.actor_model_config,
+                     device_mesh=rollout_device_mesh,
+                     trust_remote_code=trust_remote_code,
+-                )
++                    **lora_kwargs)
+             else:
+                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+ 
+             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
+-            if torch.distributed.get_world_size() == 1:
+-                self.config.rollout.load_format = "dummy_hf"
++            full_params = torch.distributed.get_world_size() == 1
+             rollout_sharding_manager = FSDPVLLMShardingManager(
+                 module=self.actor_module_fsdp,
+                 inference_engine=rollout.inference_engine,
+                 model_config=self.actor_model_config,
+-                full_params="hf" in self.config.rollout.load_format,
++                full_params=full_params,
+                 device_mesh=rollout_device_mesh,
+                 offload_param=self._is_offload_param,
++                load_format=self.config.rollout.load_format,
++                layered_summon=self.config.rollout.get('layered_summon', False),
+             )
+             log_gpu_memory_usage("After building sharding manager", logger=logger)
+ 
+@@ -494,6 +524,7 @@ class ActorRolloutRefWorker(Worker):
+         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+ 
+         use_remove_padding = self.config.model.get("use_remove_padding", False)
++        use_shm = self.config.model.get('use_shm', False)
+         use_fused_kernels = self.config.model.get("use_fused_kernels", False)
+ 
+         if self._is_actor or self._is_rollout:
+@@ -504,13 +535,15 @@ class ActorRolloutRefWorker(Worker):
+             else:
+                 optim_config = None
+                 fsdp_config = OmegaConf.create()
++
++            local_path = copy_to_local(self.config.model.path, use_shm)
+             (
+                 self.actor_module_fsdp,
+                 self.actor_optimizer,
+                 self.actor_lr_scheduler,
+                 self.actor_model_config,
+             ) = self._build_model_optimizer(
+-                model_path=self.config.model.path,
++                model_path=local_path,
+                 fsdp_config=fsdp_config,
+                 optim_config=optim_config,
+                 override_model_config=override_model_config,
+@@ -546,8 +579,9 @@ class ActorRolloutRefWorker(Worker):
+             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+ 
+         if self._is_ref:
++            local_path = copy_to_local(self.config.model.path, use_shm)
+             self.ref_module_fsdp = self._build_model_optimizer(
+-                model_path=self.config.model.path,
++                model_path=local_path,
+                 fsdp_config=self.config.ref.fsdp_config,
+                 optim_config=None,
+                 override_model_config=override_model_config,
+@@ -652,13 +686,19 @@ class ActorRolloutRefWorker(Worker):
+         get_torch_device().empty_cache()
+         return output
+ 
++
+     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+     def compute_log_prob(self, data: DataProto):
++        # when is_lora is True, we use the actor without lora applied to calculate the log_prob
++        # which is mostly used for ref log_prob calculation
+         assert self._is_actor
+         if self._is_offload_param:
+             load_fsdp_model_to_gpu(self.actor_module_fsdp)
+ 
+         # Support all hardwares
++        from contextlib import nullcontext
++        is_lora = data.meta_info.pop("is_lora", False)
++        adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+         data = data.to(get_torch_device().current_device())
+         # we should always recompute old_log_probs when it is HybridEngine
+         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+@@ -668,7 +708,8 @@ class ActorRolloutRefWorker(Worker):
+         # perform recompute log_prob
+         with self.ulysses_sharding_manager:
+             data = self.ulysses_sharding_manager.preprocess_data(data)
+-            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
++            with adapter_ctx:
++                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+             output = DataProto.from_dict(
+                 tensors={"old_log_probs": output, "entropys": entropys},
+                 meta_info={"temperature": self.config.rollout.temperature},
+@@ -690,8 +731,16 @@ class ActorRolloutRefWorker(Worker):
+ 
+     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+     def compute_ref_log_prob(self, data: DataProto):
++        if self._is_lora:
++            # if _is_lora, actor without lora applied is the ref
++            data.meta_info['is_lora'] = True
++            data = self.compute_log_prob(data)
++            # this old_log_probs is in fact ref_log_prob
++            data = DataProto.from_dict(tensors={'ref_log_prob': data.batch['old_log_probs']})
++            return data
+         assert self._is_ref
+-
++        # else:
++        # otherwise, the class have a standalone ref model
+         # Support all hardwares
+         data = data.to(get_torch_device().current_device())
+ 
+@@ -719,14 +768,38 @@ class ActorRolloutRefWorker(Worker):
+     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+         # only support save and load ckpt for actor
+         assert self._is_actor
+-        import torch
+ 
+         if self._is_offload_param:
+             load_fsdp_model_to_gpu(self.actor_module_fsdp)
+ 
+         self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
++        dist.barrier()
++
++        if self._is_lora and isinstance(self.actor_module, PeftModel):
++            lora_save_path = os.path.join(local_path, "lora_adapter")
++            peft_config = {}
++            if dist.get_rank() == 0:
++                os.makedirs(lora_save_path, exist_ok=True)
++                peft_config = asdict(self.actor_module.peft_config.get('default', {}))
++                peft_config['task_type'] = peft_config['task_type'].value
++                peft_config['peft_type'] = peft_config['peft_type'].value
++                peft_config['target_modules'] = list(peft_config['target_modules'])
++            try:
++                if isinstance(self.actor_module_fsdp, FSDP):
++                    self.actor_module_fsdp = self.actor_module_fsdp.cuda()
++                    lora_params = layered_summon_lora_params(self.actor_module_fsdp)
++                    if dist.get_rank() == 0:
++                        save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
++                        with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding='utf-8') as f:
++                            json.dump(peft_config, f, ensure_ascii=False, indent=4)
++            except Exception as e:
++                if dist.get_rank() == 0:
++                    print(f"[rank-{self.rank}]: Save LoRA Adapter Error ({e})")
++
++            dist.barrier()
++            if dist.get_rank() == 0:
++                print(f"[rank-{self.rank}]: Saved LoRA adapter to: {lora_save_path}")
+ 
+-        torch.distributed.barrier()
+         if self._is_offload_param:
+             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+ 
+@@ -784,6 +857,7 @@ class CriticWorker(Worker):
+         if self.config.ppo_micro_batch_size_per_gpu is not None:
+             assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.ppo_micro_batch_size_per_gpu}"
+             assert self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.ppo_micro_batch_size_per_gpu}"
++        self._is_lora = self.config.model.get('lora_rank', 0) > 0
+ 
+     def _build_critic_model_optimizer(self, config):
+         # the following line is necessary
+@@ -794,11 +868,12 @@ class CriticWorker(Worker):
+         from verl.utils.model import print_model_size
+         from verl.utils.torch_dtypes import PrecisionType
+ 
+-        local_path = copy_to_local(config.model.path)
++        use_shm = config.model.get('use_shm', False)
++        local_path = copy_to_local(config.model.path, use_shm=use_shm)
+         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
+         # using random initialized model from any architecture. May not be the same as Actor.
+ 
+-        tokenizer_path = copy_to_local(config.model.tokenizer_path)
++        tokenizer_path = copy_to_local(config.model.tokenizer_path, use_shm=use_shm)
+         self.tokenizer = hf_tokenizer(tokenizer_path, trust_remote_code=config.model.get("trust_remote_code", False))
+         self.processor = hf_processor(tokenizer_path, trust_remote_code=config.model.get("trust_remote_code", False))
+ 
+@@ -849,6 +924,20 @@ class CriticWorker(Worker):
+ 
+             if config.model.get("enable_gradient_checkpointing", False):
+                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++        
++        if self._is_lora:
++            print("Applying LoRA to critic module")
++            critic_module.enable_input_require_grads()
++            # Convert config to regular Python types before creating PEFT model
++            lora_config = {
++                'task_type': TaskType.CAUSAL_LM,
++                'r': self.config.model.lora_rank,
++                'lora_alpha': self.config.model.lora_alpha,
++                'target_modules': convert_to_regular_types(self.config.model.target_modules),
++                'bias': "none",
++            }
++            critic_module = get_peft_model(critic_module, LoraConfig(**lora_config))
++
+         if self.rank == 0:
+             print_model_size(critic_module)
+ 
+@@ -867,7 +956,7 @@ class CriticWorker(Worker):
+ 
+         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+ 
+-        auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
++        auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy, is_lora=self.config.model.get('lora_rank', 0) > 0)
+ 
+         log_gpu_memory_usage("Before critic FSDP", logger=None)
+ 
+@@ -1101,14 +1190,15 @@ class RewardModelWorker(Worker):
+         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+         from transformers import AutoConfig, AutoModelForTokenClassification
+ 
++        use_shm = config.model.get('use_shm', False)
+         # download the checkpoint from hdfs
+-        local_path = copy_to_local(config.model.path)
++        local_path = copy_to_local(config.model.path, use_shm=use_shm)
+ 
+         if self.config.model.input_tokenizer is None:
+             self._do_switch_chat_template = False
+         else:
+             self._do_switch_chat_template = True
+-            input_tokenizer_local_path = copy_to_local(config.model.input_tokenizer)
++            input_tokenizer_local_path = copy_to_local(config.model.input_tokenizer, use_shm=use_shm)
+             self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=config.model.get("trust_remote_code", False))
+             self.tokenizer = hf_tokenizer(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
+ 
+diff --git a/verl/workers/megatron_workers.py b/verl/workers/megatron_workers.py
+index 10cedcaa..f31d99cd 100644
+--- a/verl/workers/megatron_workers.py
++++ b/verl/workers/megatron_workers.py
+@@ -226,7 +226,7 @@ class ActorRolloutRefWorker(MegatronWorker):
+             rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+             log_gpu_memory_usage("Before building vllm rollout", logger=None)
+ 
+-            local_path = copy_to_local(self.config.model.path)
++            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get('use_shm', False))
+             if vllm_mode == "customized":
+                 rollout = vLLMRollout(
+                     actor_module=self.actor_module,
+@@ -877,12 +877,13 @@ class RewardModelWorker(MegatronWorker):
+         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+         override_transformer_config = OmegaConf.to_container(self.config.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
+ 
+-        sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer)
++        use_shm = self.config.model.get('use_shm', False)
++        sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
+         sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
+         rm_tokenizer_path = self.config.model.get("rm_tokenizer", None)
+         rm_tokenizer = None
+         if rm_tokenizer_path is not None:
+-            rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path)
++            rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
+             rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path)
+ 
+         self.param_dtype = torch.bfloat16
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_rollout.py b/verl/workers/rollout/vllm_rollout/vllm_rollout.py
+index 06817b5d..be3e6da4 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_rollout.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_rollout.py
+@@ -47,6 +47,7 @@ from verl.workers.rollout.base import BaseRollout
+ 
+ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
++from vllm.lora.request import LoRARequest
+ 
+ # TODO
+ # 1. support pp in vllm
+@@ -116,6 +117,8 @@ class vLLMRollout(BaseRollout):
+         #    (which can vary across different vLLM versions);
+         # - Otherwise it's the desired value we want to explicitly set.
+         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
++        lora_kwargs = kwargs.pop('lora_kwargs', {})
++        self.lora_kwargs = lora_kwargs
+         self.inference_engine = LLM(
+             actor_module,
+             tokenizer=tokenizer,
+@@ -130,6 +133,7 @@ class vLLMRollout(BaseRollout):
+             disable_log_stats=config.disable_log_stats,
+             max_num_batched_tokens=max_num_batched_tokens,
+             enable_chunked_prefill=config.enable_chunked_prefill,
++            **lora_kwargs,
+             **engine_kwargs,
+         )
+ 
+@@ -217,12 +221,20 @@ class vLLMRollout(BaseRollout):
+                 "n": 1,  # if validate, already repeat in ray_trainer
+             }
+ 
++        lora_requests = None
++        if self.lora_kwargs:
++            # self.inference_engine.llm_engine.list_loras
++            lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
++            if len(lora_int_ids) > 0:
++                lora_int_id=lora_int_ids[0]
++                lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
+         # users can customize different sampling_params at different run
+         with self.update_sampling_params(**kwargs):
+             output = self.inference_engine.generate(
+                 prompts=None,  # because we have already convert it to prompt token id
+                 sampling_params=self.sampling_params,
+                 prompt_token_ids=idx_list,
++                lora_request=lora_requests,
+                 use_tqdm=False,
+             )
+ 
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py b/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
+index f41c0ec9..5da1bd62 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
+@@ -46,6 +46,7 @@ from verl.third_party.vllm import vllm_version
+ from verl.utils.debug import GPUMemoryLogger
+ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+ from verl.workers.rollout.base import BaseRollout
++from vllm.lora.request import LoRARequest
+ 
+ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+@@ -135,6 +136,8 @@ class vLLMRollout(BaseRollout):
+         if config.get("limit_images", None):  # support for multi-image data
+             limit_mm_per_prompt = {"image": config.get("limit_images")}
+ 
++        lora_kwargs = kwargs.pop('lora_kwargs', {})
++        self.lora_kwargs = lora_kwargs
+         # copy it to avoid secretly modifying the engine config
+         engine_kwargs = {} if "engine_kwargs" not in config or "vllm" not in config.engine_kwargs else OmegaConf.to_container(deepcopy(config.engine_kwargs.vllm))
+         # For each vLLM engine parameter,
+@@ -162,6 +165,7 @@ class vLLMRollout(BaseRollout):
+             enable_prefix_caching=True,
+             trust_remote_code=trust_remote_code,
+             seed=config.get("seed", 0),
++            **lora_kwargs,
+             **engine_kwargs,
+         )
+ 
+@@ -270,11 +274,19 @@ class vLLMRollout(BaseRollout):
+                 "n": 1,  # if validate, already repeat in ray_trainer
+             }
+ 
++        lora_requests = None
++        if self.lora_kwargs:
++            lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
++            if len(lora_int_ids) > 0:
++                lora_int_id=lora_int_ids[0]
++                lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
++
+         # users can customize different sampling_params at different run
+         with self.update_sampling_params(**kwargs):
+             outputs = self.inference_engine.generate(
+                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                 sampling_params=self.sampling_params,
++                lora_request=lora_requests,
+                 use_tqdm=False,
+             )
+ 
+diff --git a/verl/workers/sharding_manager/fsdp_vllm.py b/verl/workers/sharding_manager/fsdp_vllm.py
+index 133db24e..0c68e2c4 100644
+--- a/verl/workers/sharding_manager/fsdp_vllm.py
++++ b/verl/workers/sharding_manager/fsdp_vllm.py
+@@ -16,10 +16,14 @@ import inspect
+ import logging
+ import os
+ 
++import time
++from typing import List
+ import torch
+ from torch.distributed.device_mesh import DeviceMesh
+ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
++from peft import PeftModel
+ from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
++from collections import OrderedDict
+ 
+ try:
+     # for torch 2.5+
+@@ -32,17 +36,20 @@ from verl.protocol import all_gather_data_proto
+ from verl.third_party.vllm import LLM, vllm_version
+ from verl.third_party.vllm import parallel_state as vllm_ps
+ from verl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
+-from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
++from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu, layered_summon_lora_params
+ from verl.utils.torch_functional import check_cuda_is_available
+-from verl.utils.vllm_utils import patch_vllm_moe_model_weight_loader
++from verl.utils.vllm_utils import VLLMHijack, is_version_ge, patch_vllm_moe_model_weight_loader, TensorLoRARequest
+ from verl.utils.device import get_torch_device
+ 
+ from .base import BaseShardingManager
+ 
++from dataclasses import asdict
++
+ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ 
+ 
++
+ class FSDPVLLMShardingManager(BaseShardingManager):
+     @check_cuda_is_available()
+     def __init__(
+@@ -53,6 +60,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+         full_params: bool = False,
+         device_mesh: DeviceMesh = None,
+         offload_param: bool = False,
++        load_format: str = 'dummy_hf',
++        layered_summon: bool = True
+     ):
+         self.module = module
+         # For AsyncLLM, inference_engine and model_runner are defer intialized in vLLMAsyncRollout.load_model
+@@ -69,6 +78,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+         self.model_config = model_config
+         self.device_mesh = device_mesh
+         self.offload_param = offload_param
++        self.load_format = load_format
++        self.layered_summon = layered_summon
+ 
+         # Full params
+         self.full_params = full_params
+@@ -95,8 +106,57 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+         else:
+             self.gen_random_states = None
+ 
++        self.base_sync_done: bool = 'dummy' not in load_format
++        if is_version_ge(pkg='vllm', minver='0.7.3'):
++            VLLMHijack.hijack()
++
+     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
+     def __enter__(self):
++        def __collect_lora_params()->OrderedDict:
++            """
++            collect lora params or full params if base model is not ready in vllm
++            work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
++            """
++            from peft.utils.save_and_load import get_peft_model_state_dict
++
++            lora_params = OrderedDict()
++            if fsdp_version(self.module) > 0:
++                if self.layered_summon:
++                    if not self.base_sync_done:
++                        raise ValueError("To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let rollout.load_format=safetensors")
++                    lora_params = layered_summon_lora_params(self.module)
++                else:
++                    with FSDP.summon_full_params(self.module, writeback=False):
++                        if self.base_sync_done:
++                            lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
++                            lora_params = {name: param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu() 
++                                        for name, param in lora_params.items()}
++                        else:
++                            model = self.module._fsdp_wrapped_module.base_model.model
++                            orig_dev = 'cpu' if 'cpu' in next(model.parameters()).device else 'cuda'
++                            model = model.to('cpu')
++                            for name, param in model.state_dict().items():
++                                if any(x in name for x in ['_flat_param', 'lora_']):
++                                    continue
++                                name = name.replace("_fsdp_wrapped_module.","").replace(".base_layer","")
++                                lora_params[name] = param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu()
++                            model = model.to(orig_dev)
++                    torch.cuda.empty_cache()
++            else:
++                if self.base_sync_done:
++                    lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
++                else:
++                    model = self.module._fsdp_wrapped_module.base_model.model
++                    orig_dev = 'cpu' if 'cpu' in next(model.parameters()).device else 'cuda'
++                    model = model.to('cpu')
++                    for name, param in model.state_dict().items():
++                        if any(x in name for x in ['_flat_param', 'lora_']):
++                            continue
++                        name = name.replace("_fsdp_wrapped_module.","").replace(".base_layer","")
++                        lora_params[name] = param.detach().cpu()
++                    model = model.to(orig_dev)
++            return lora_params
++
+         # NOTE: Basically, we only need `get_torch_device().empty_cache()` before vllm wake_up and
+         # after vllm sleep, since vllm has its own caching memory allocator CuMemAllocator.
+         # Out of vllm scope, we should avoid empty cache to let pytorch using caching memory
+@@ -109,8 +169,15 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
+         if self.offload_param:
+             load_fsdp_model_to_gpu(self.module)
+-        params = self.module.state_dict()
++
++        peft_config = None
++        if isinstance(self.module._fsdp_wrapped_module, PeftModel):
++            peft_config = self.module._fsdp_wrapped_module.peft_config.get('default', None)
++            params = __collect_lora_params()
++        else:
++            params = self.module.state_dict()
+         log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
++
+         # Copy, not share memory
+         load_format = "hf" if self.full_params else "dtensor"
+ 
+@@ -128,7 +195,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+                 self.inference_engine.wake_up()
+ 
+             # update model params
+-            self.update_params(params)
++            self.update_params(params, peft_config=peft_config)
+             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
+             del params
+             if self.offload_param:
+@@ -192,9 +259,35 @@ class FSDPVLLMShardingManager(BaseShardingManager):
+ 
+         return data.chunk(chunks=self.tp_size)[self.tp_rank]
+ 
+-    def update_params(self, updated_params):
++    def update_params(self, updated_params, peft_config=None):
+         model = self.model_runner.model
++        if peft_config:
++            if self.base_sync_done:
++                lora_int_id=int(time.time_ns() % 0x7FFFFFFF)
++                lora_reqest = TensorLoRARequest(
++                    lora_name=f"{lora_int_id}",
++                    lora_int_id=lora_int_id,
++                    lora_path="simon_lora_path",
++                    peft_config=asdict(peft_config),
++                    lora_tensors=updated_params,
++                )
++                self.inference_engine.llm_engine.add_lora(lora_reqest)
++                logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
++                return
++            else:
++                def replace_lora_wrapper(k):
++                    stacked_params = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
++                    if any([k.endswith(f"{s}.weight") for s in stacked_params]):
++                        return k.replace(".weight", ".base_layer.weight")
++                    if any([k.endswith(f"{s}.bias") for s in stacked_params]):
++                        return k.replace(".bias", ".base_layer.bias")
++                    return k
++                updated_params = {replace_lora_wrapper(k): v for k, v in updated_params.items()}
++
+         patch_vllm_moe_model_weight_loader(model)
+         device = get_torch_device().current_device()  # used when fsdp2 set cpu_offload_policy
+         loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
+         logger.info("vLLM load weights, loaded_params: %d", len(loaded_params))
++
++        self.base_sync_done = True
++        logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
